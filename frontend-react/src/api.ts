@@ -1,10 +1,35 @@
 import type { PlanModel } from './types'
 
+export interface ImageAdjustments {
+  brightness: number
+  contrast: number
+  highlights: number
+  shadows: number
+  whites: number
+  blacks: number
+  sharpness: number
+  grayscale: boolean
+  invert: boolean
+}
+
+export const DEFAULT_ADJUSTMENTS: ImageAdjustments = {
+  brightness: 0,
+  contrast: 0,
+  highlights: 0,
+  shadows: 0,
+  whites: 0,
+  blacks: 0,
+  sharpness: 0,
+  grayscale: false,
+  invert: false,
+}
+
 export interface ConvertOptions {
   drawingScale: number
   knownWidthM: number
   pxPerM: number
   crop?: [number, number, number, number] | null
+  adjustments?: ImageAdjustments
 }
 
 export async function convertPlan(file: File, o: ConvertOptions): Promise<PlanModel> {
@@ -14,6 +39,24 @@ export async function convertPlan(file: File, o: ConvertOptions): Promise<PlanMo
   fd.append('known_width_m', String(o.knownWidthM || 0))
   fd.append('px_per_m', String(o.pxPerM || 0))
   if (o.crop) fd.append('crop', o.crop.join(','))
+  if (o.adjustments) {
+    Object.entries(o.adjustments).forEach(([key, value]) => {
+      fd.append(key, String(value))
+    })
+
+  const a = o.adjustments
+  if (a) {
+    fd.append('brightness', String(a.brightness))
+    fd.append('contrast', String(a.contrast))
+    fd.append('highlights', String(a.highlights))
+    fd.append('shadows', String(a.shadows))
+    fd.append('whites', String(a.whites))
+    fd.append('blacks', String(a.blacks))
+    fd.append('sharpness', String(a.sharpness))
+    fd.append('grayscale', String(a.grayscale))
+    fd.append('invert', String(a.invert))
+  }
+  }
 
   const res = await fetch('/api/convert', { method: 'POST', body: fd })
   if (!res.ok) {

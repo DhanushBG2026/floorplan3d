@@ -94,3 +94,59 @@
 .chat-input input { flex: 1; background: #26262c; color: #eee; border: 1px solid #3a3a42; border-radius: 6px; padding: 7px 9px; }
 .chat-input button { background: #3b82f6; color: #fff; border: 0; border-radius: 6px; padding: 0 14px; font-weight: 600; cursor: pointer; }
 .chat-input button:disabled { opacity: .5; cursor: default; }
+
+
+.image-adjustments {
+  margin-top: 18px;
+  padding: 16px;
+  border: 1px solid #d7dce2;
+  border-radius: 10px;
+  background: #f8fafc;
+  color: #1f2937;
+}
+
+.adjustments-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.adjustments-heading h3 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.adjustment-control {
+  display: block;
+  margin: 14px 0;
+}
+
+.adjustment-control > span {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+  font-size: 13px;
+}
+
+.adjustment-control output {
+  font-variant-numeric: tabular-nums;
+  color: #64748b;
+}
+
+.adjustment-control input[type="range"] {
+  display: block;
+  width: 100%;
+  cursor: pointer;
+  accent-color: #2563eb;
+}
+
+.adjustment-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 16px;
+  font-size: 13px;
+}

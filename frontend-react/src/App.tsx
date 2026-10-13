@@ -6,7 +6,12 @@ import './App.css'
 import { GROUNDS, type GroundType } from './ground'
 import type { DimMode } from './types'
 import { buildGroups } from './groups'
-import { convertPlan, previewPlan } from './api'
+import {
+  convertPlan,
+  previewPlan,
+  DEFAULT_ADJUSTMENTS,
+  type ImageAdjustments,
+} from './api'
 import CropDialog, { type CropBox } from './CropDialog'
 import ChatPanel from './ChatPanel'
 
@@ -35,6 +40,7 @@ export default function App() {
   const deleted = hist.present
   const groups = useMemo(() => (model ? buildGroups(model) : null), [model])
   const [docText, setDocText] = useState('')
+  const [adjustments, setAdjustments] = useState<ImageAdjustments>({ ...DEFAULT_ADJUSTMENTS })
 
 
   const onFileChosen = async (f: File | null) => {
@@ -68,6 +74,7 @@ export default function App() {
         knownWidthM: toM(parseFloat(knownW) || 0),
         pxPerM: (parseFloat(ppm) || 0) / FT,
         crop,
+        adjustments,
       })
       setModel(m)
       setHeights({})
@@ -393,6 +400,8 @@ export default function App() {
         <CropDialog
           image={preview.image}
           initial={crop}
+          adjustments={adjustments}
+          onAdjustmentsChange={setAdjustments}
           onConfirm={box => {
             setCrop(box)
             setCropOpen(false)

@@ -42,6 +42,62 @@ def apply_crop(gray, crop: str):
         raise HTTPException(400, "Selected area is too small")
     return gray[py0:py1, px0:px1].copy()
 
+def apply_adjustments(
+    gray: np.ndarray,
+    brightness: float = 0,
+    contrast: float = 0,
+    highlights: float = 0,
+    shadows: float = 0,
+    whites: float = 0,
+    blacks: float = 0,
+    sharpness: float = 0,
+    invert: bool = False,
+) -> np.ndarray:
+    """Apply tonal adjustments to an 8-bit grayscale floor-plan image."""
+    brightness = float(np.clip(brightness, -100, 100))
+    contrast = float(np.clip(contrast, -100, 100))
+    highlights = float(np.clip(highlights, -100, 100))
+    shadows = float(np.clip(shadows, -100, 100))
+    whites = float(np.clip(whites, -100, 100))
+    blacks = float(np.clip(blacks, -100, 100))
+    sharpness = float(np.clip(sharpness, 0, 100))
+
+    x = gray.astype(np.float32) / 255.0
+
+    # Brightness and contrast.
+    x += brightness / 200.0
+    factor = 2.0 ** (contrast / 50.0)
+    x = (x - 0.5) * factor + 0.5
+    x = np.clip(x, 0.0, 1.0)
+
+    # Shadows affect dark pixels more; highlights affect bright pixels more.
+    shadow_mask = (1.0 - x) ** 2
+    highlight_mask = x ** 2
+
+    x += (shadows / 200.0) * shadow_mask
+    x += (highlights / 200.0) * highlight_mask
+
+    # Whites and blacks target the upper and lower tonal ranges.
+    white_mask = np.clip((x - 0.55) / 0.45, 0.0, 1.0) ** 2
+    black_mask = np.clip((0.45 - x) / 0.45, 0.0, 1.0) ** 2
+
+    x += (whites / 200.0) * white_mask
+    x += (blacks / 200.0) * black_mask
+    x = np.clip(x, 0.0, 1.0)
+
+    result = np.round(x * 255).astype(np.uint8)
+
+    # Unsharp masking to enhance thin wall edges.
+    if sharpness > 0:
+        blurred = cv2.GaussianBlur(result, (0, 0), sigmaX=1.2)
+        amount = sharpness / 50.0
+        result = cv2.addWeighted(result, 1.0 + amount, blurred, -amount, 0)
+
+    if invert:
+        result = cv2.bitwise_not(result)
+
+    return result
+
 
 @app.post("/api/convert")
 async def convert(
@@ -49,7 +105,15 @@ async def convert(
     drawing_scale: float = Form(100),      # 1:100 -> 100 (PDF only)
     px_per_m: float = Form(0),             # manual override (images)
     known_width_m: float = Form(0),
-    crop: str = Form(""),        # real overall width of the plan -> auto-calibrate
+    crop: str = Form(""),
+    brightness: float = Form(0),
+    contrast: float = Form(0),
+    highlights: float = Form(0),
+    shadows: float = Form(0),
+    whites: float = Form(0),
+    blacks: float = Form(0),
+    sharpness: float = Form(0),
+    invert: bool = Form(False),        # real overall width of the plan -> auto-calibrate
 ):
     gray, is_pdf = load_gray(await file.read(), file.filename or "")
     gray = apply_crop(gray, crop)
