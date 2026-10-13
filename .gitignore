@@ -1,0 +1,8 @@
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+.env
+.venv/
+__pycache__/
+node_modules/

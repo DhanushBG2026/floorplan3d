@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Floor plan → 3D</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { font-family: system-ui, sans-serif; }
+  body { margin:0; display:flex; height:100vh; background:#111; color:#eee; }
+  #side { width:320px; padding:14px; overflow:auto; background:#1b1b1f; box-sizing:border-box; }
+  #side h1 { font-size:17px; margin:0 0 10px; }
+  label { display:block; font-size:12px; margin:10px 0 3px; color:#aaa; }
+  input[type=number], input[type=file] { width:100%; box-sizing:border-box; background:#26262c; color:#eee; border:1px solid #3a3a42; border-radius:6px; padding:6px; }
+  button { width:100%; margin-top:14px; padding:10px; border:0; border-radius:6px; background:#3b82f6; color:#fff; font-weight:600; cursor:pointer; }
+  button:disabled { opacity:.5; cursor:wait; }
+  #status { font-size:12px; margin-top:10px; color:#9ca3af; min-height:16px; }
+  #overlay { width:100%; margin-top:12px; border-radius:6px; background:#fff; display:none; }
+  .legend span { display:inline-block; width:10px; height:10px; margin:0 4px 0 8px; border-radius:2px; }
+  #view { flex:1; position:relative; }
+  .dim { color:#111; background:rgba(255,255,255,.9); font-size:11px; padding:1px 4px; border-radius:3px; white-space:nowrap; pointer-events:none; }
+  .dim.open { background:#fde68a; }
+  #view canvas, #view .css { position:absolute; inset:0; }
+  #hint { position:absolute; left:12px; bottom:10px; font-size:12px; color:#9ca3af; }
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/" } }
+</script>
+</head>
+<body>
+<div id="side">
+  <h1>Floor plan → 3D (MVP)</h1>
+  <label>Floor plan (PDF, PNG, JPG)</label>
+  <input id="file" type="file" accept=".pdf,image/*">
+  <label>PDF drawing scale (1 : N)</label>
+  <input id="scale" type="number" value="100" min="1">
+  <label>Real overall plan width in metres (best calibration, optional)</label>
+  <input id="knownW" type="number" step="0.01" placeholder="e.g. 12.4">
+  <label>Pixels per metre (images only, optional)</label>
+  <input id="ppm" type="number" step="0.1" placeholder="leave empty if unknown">
+  <label>Wall height (m)</label>
+  <input id="wallH" type="number" value="2.8" step="0.1">
+  <button id="go">Generate 3D model</button>
+  <div id="status"></div>
+  <label><input type="checkbox" id="showDims" checked> Show dimensions</label>
+  <div class="legend" style="font-size:12px;margin-top:10px">
+    Detected: <span style="background:#1e78c8"></span>wall <span style="background:#3caa3c"></span>door <span style="background:#f08c28"></span>window
+  </div>
+  <img id="overlay" alt="detection overlay">
+</div>
+<div id="view"><div id="hint">Left drag: orbit · right drag: pan · wheel: zoom</div></div>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
+
+const $ = id => document.getElementById(id);
+const view = $('view');
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x15161a);
+const camera = new THREE.PerspectiveCamera(50, 1, 0.1, 500);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+view.appendChild(renderer.domElement);
+const labelRenderer = new CSS2DRenderer();
+labelRenderer.domElement.className = 'css';
+labelRenderer.domElement.style.pointerEvents = 'none';
+view.appendChild(labelRenderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+
+scene.add(new THREE.HemisphereLight(0xffffff, 0x444455, 1.1));
+const sun = new THREE.DirectionalLight(0xffffff, 1.2); sun.position.set(10, 20, 8); scene.add(sun);
+
+let modelGroup = null;
+const dimLabels = [];
+
+function resize() {
+  const w = view.clientWidth, h = view.clientHeight;
+  renderer.setSize(w, h); labelRenderer.setSize(w, h);
+  camera.aspect = w / h; camera.updateProjectionMatrix();
+}
+addEventListener('resize', resize); resize();
+(function loop() { requestAnimationFrame(loop); controls.update(); renderer.render(scene, camera); labelRenderer.render(scene, camera); })();
+
+const M = {
+  wall:  new THREE.MeshStandardMaterial({ color: 0xe8e4dc }),
+  door:  new THREE.MeshStandardMaterial({ color: 0x3caa3c }),
+  win:   new THREE.MeshStandardMaterial({ color: 0x9ad1ff, transparent: true, opacity: 0.35 }),
+  frame: new THREE.MeshStandardMaterial({ color: 0xf08c28 }),
+  floor: new THREE.MeshStandardMaterial({ color: 0x2b2d34 }),
+};
+const DOOR_H = 2.1, SILL = 0.9, WIN_TOP = 2.1;
+
+// plan coords: x right, y down (m)  ->  three: x right, z = y, y up
+function box(x0, z0, x1, z1, y0, y1, mat, shrink = 0) {
+  const w = x1 - x0, d = z1 - z0, h = y1 - y0;
+  if (w <= 0 || d <= 0 || h <= 0) return null;
+  const m = new THREE.Mesh(new THREE.BoxGeometry(w, h - shrink, d), mat);
+  m.position.set((x0 + x1) / 2, y0 + (h - shrink) / 2, (z0 + z1) / 2);
+  return m;
+}
+function label(text, pos, cls = '') {
+  const d = document.createElement('div'); d.className = 'dim ' + cls; d.textContent = text;
+  const o = new CSS2DObject(d); o.position.copy(pos); dimLabels.push(o); return o;
+}
+function dimLine(a, b, offsetVec, text, cls, group) {
+  const p0 = a.clone().add(offsetVec), p1 = b.clone().add(offsetVec);
+  const g = new THREE.BufferGeometry().setFromPoints([a, p0, p0, p1, p1, b]);
+  const l = new THREE.LineSegments(g, new THREE.LineBasicMaterial({ color: cls ? 0xfbbf24 : 0xffffff }));
+  dimLabels.push(l);
+  group.add(l);
+  group.add(label(text, p0.clone().lerp(p1, 0.5), cls));
+}
+
+function build(model, H) {
+  if (modelGroup) { scene.remove(modelGroup); }
+  dimLabels.length = 0;
+  modelGroup = new THREE.Group(); scene.add(modelGroup);
+  const b = model.bounds, cx = (b.x0 + b.x1) / 2, cz = (b.y0 + b.y1) / 2;
+
+  // floor
+  const floor = box(b.x0, b.y0, b.x1, b.y1, -0.1, 0, M.floor);
+  if (floor) modelGroup.add(floor);
+
+  // walls (vertical walls a hair lower so coplanar tops don't z-fight)
+  for (const w of model.walls) {
+    const m = box(w.x0, w.y0, w.x1, w.y1, 0, H, M.wall, w.horizontal ? 0 : 0.004);
+    if (m) modelGroup.add(m);
+    // outline
+    const e = new THREE.LineSegments(new THREE.EdgesGeometry(m.geometry), new THREE.LineBasicMaterial({ color: 0x777777 }));
+    e.position.copy(m.position); modelGroup.add(e);
+  }
+
+  // openings: lintel above, sill below (windows), glass / door marker
+  for (const o of model.openings) {
+    const t = o.thickness, hz = o.horizontal;
+    const rect = (y0, y1, mat) => hz
+      ? box(o.start, o.centre - t / 2, o.end, o.centre + t / 2, y0, y1, mat)
+      : box(o.centre - t / 2, o.start, o.centre + t / 2, o.end, y0, y1, mat);
+    const top = o.type === 'window' ? WIN_TOP : DOOR_H;
+    const parts = [rect(top, H, M.wall)];
+    if (o.type === 'window') { parts.push(rect(0, SILL, M.wall), rect(SILL, top, M.win)); }
+    else { const f = rect(0, 0.02, M.door); parts.push(f); }
+    parts.forEach(p => p && modelGroup.add(p));
+  }
+
+  // dimensions: wall lengths on the outside of each long wall, opening widths on the wall
+  const fmt = v => v.toFixed(2) + ' m';
+  for (const w of model.walls) {
+    if (w.length < 0.8) continue;
+    const hz = w.horizontal, mid = hz ? (w.y0 + w.y1) / 2 : (w.x0 + w.x1) / 2;
+    const outward = hz ? (mid < cz ? -1 : 1) : (mid < cx ? -1 : 1);
+    const off = (w.thickness / 2 + 0.35) * outward;
+    const a = hz ? new THREE.Vector3(w.x0, H + 0.02, mid) : new THREE.Vector3(mid, H + 0.02, w.y0);
+    const c = hz ? new THREE.Vector3(w.x1, H + 0.02, mid) : new THREE.Vector3(mid, H + 0.02, w.y1);
+    dimLine(a, c, hz ? new THREE.Vector3(0, 0, off) : new THREE.Vector3(off, 0, 0), fmt(w.length), '', modelGroup);
+  }
+  for (const o of model.openings) {
+    const hz = o.horizontal, y = (o.type === 'window' ? WIN_TOP : DOOR_H) + 0.35;
+    const a = hz ? new THREE.Vector3(o.start, y, o.centre) : new THREE.Vector3(o.centre, y, o.start);
+    const c = hz ? new THREE.Vector3(o.end, y, o.centre) : new THREE.Vector3(o.centre, y, o.end);
+    dimLine(a, c, new THREE.Vector3(0, 0.25, 0), `${o.type} ${fmt(o.width)}`, 'open', modelGroup);
+  }
+  setDims($('showDims').checked);
+
+  // camera
+  const size = Math.max(b.x1 - b.x0, b.y1 - b.y0, 4);
+  controls.target.set(cx, H / 2, cz);
+  camera.position.set(cx + size * 0.8, size * 0.9, cz + size * 1.1);
+  camera.lookAt(controls.target);
+}
+
+function setDims(on) { dimLabels.forEach(o => o.visible = on); }
+$('showDims').onchange = e => setDims(e.target.checked);
+
+$('go').onclick = async () => {
+  const f = $('file').files[0];
+  if (!f) { $('status').textContent = 'Choose a PDF or image first.'; return; }
+  const fd = new FormData();
+  fd.append('file', f);
+  fd.append('drawing_scale', $('scale').value || 100);
+  fd.append('known_width_m', $('knownW').value || 0);
+  fd.append('px_per_m', $('ppm').value || 0);
+  $('go').disabled = true; $('status').textContent = 'Analysing…';
+  try {
+    const r = await fetch('/api/convert', { method: 'POST', body: fd });
+    if (!r.ok) throw new Error((await r.json()).detail || r.statusText);
+    const model = await r.json();
+    build(model, parseFloat($('wallH').value) || 2.8);
+    const ov = $('overlay'); ov.src = model.overlay; ov.style.display = 'block';
+    const n = t => model.openings.filter(o => o.type === t).length;
+    $('status').textContent = `${model.walls.length} walls, ${n('door')} doors, ${n('window')} windows` + (n('opening') ? `, ${n('opening')} wide openings` : '');
+  } catch (e) { $('status').textContent = 'Error: ' + e.message; }
+  $('go').disabled = false;
+};
+</script>
+</body>
+</html>
