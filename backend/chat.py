@@ -7,7 +7,7 @@ from google.genai import types
 
 load_dotenv(Path(__file__).with_name(".env"))
 
-MODEL = os.getenv("CHAT_MODEL", "gemini-3.5-flash")
+MODEL = os.getenv("CHAT_MODEL", "gemini-3.1-flash-lite")
 MAX_DOC_CHARS = 60_000
 MAX_HISTORY = 20
 MAX_MESSAGE_CHARS = 2_000

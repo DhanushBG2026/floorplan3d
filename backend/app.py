@@ -114,9 +114,21 @@ async def convert(
     blacks: float = Form(0),
     sharpness: float = Form(0),
     invert: bool = Form(False),        # real overall width of the plan -> auto-calibrate
-):
+    ):
     gray, is_pdf = load_gray(await file.read(), file.filename or "")
     gray = apply_crop(gray, crop)
+
+    gray = apply_adjustments(
+        gray,
+        brightness=brightness,
+        contrast=contrast,
+        highlights=highlights,
+        shadows=shadows,
+        whites=whites,
+        blacks=blacks,
+        sharpness=sharpness,
+        invert=invert,
+    )
     # long side cap keeps processing fast
     s = 3000 / max(gray.shape)
     if s < 1:

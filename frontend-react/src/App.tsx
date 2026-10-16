@@ -14,6 +14,7 @@ import {
 } from './api'
 import CropDialog, { type CropBox } from './CropDialog'
 import ChatPanel from './ChatPanel'
+import type { RoofType } from './roof'
 
 interface DeleteHistory { past: number[][]; present: number[]; future: number[][] }
 const EMPTY_HIST: DeleteHistory = { past: [], present: [], future: [] }
@@ -41,6 +42,13 @@ export default function App() {
   const groups = useMemo(() => (model ? buildGroups(model) : null), [model])
   const [docText, setDocText] = useState('')
   const [adjustments, setAdjustments] = useState<ImageAdjustments>({ ...DEFAULT_ADJUSTMENTS })
+  const [roofType, setRoofType] = useState<RoofType>('none')
+  const [roofOn, setRoofOn] = useState(true)
+  const [ridgeFt, setRidgeFt] = useState(10.8)
+  const [overhangFt, setOverhangFt] = useState(1)
+  const [stumpFt, setStumpFt] = useState(0)
+  const [sillFt, setSillFt] = useState(2.95)
+  const [topFt, setTopFt] = useState(6.9)
 
 
   const onFileChosen = async (f: File | null) => {
@@ -266,6 +274,39 @@ export default function App() {
         <label>Wall height (ft)</label>
         <input type="number" step="0.5" value={wallH} onChange={e => setWallH(Number(e.target.value) || 9)} />
 
+        <h3 className="sub">Roof and levels</h3>
+
+        <label>Roof</label>
+        <select value={roofType} onChange={e => setRoofType(e.target.value as RoofType)}>
+          <option value="none">None</option>
+          <option value="gable">Gable</option>
+          <option value="hip">Hip</option>
+          <option value="skillion">Skillion</option>
+          <option value="flat">Flat</option>
+        </select>
+
+        {roofType !== 'none' && (
+          <>
+            <label className="check">
+              <input type="checkbox" checked={roofOn} onChange={e => setRoofOn(e.target.checked)} />
+              Show roof
+            </label>
+            <label>Ridge or high point, above floor (ft)</label>
+            <input type="number" step="0.1" value={ridgeFt} onChange={e => setRidgeFt(Number(e.target.value) || 0)} />
+            <label>Roof overhang (ft)</label>
+            <input type="number" step="0.1" min={0} value={overhangFt} onChange={e => setOverhangFt(Number(e.target.value) || 0)} />
+          </>
+        )}
+
+        <label>Floor above ground, stumps (ft)</label>
+        <input type="number" step="0.1" min={0} value={stumpFt} onChange={e => setStumpFt(Number(e.target.value) || 0)} />
+
+        <label>Window sill height (ft)</label>
+        <input type="number" step="0.1" min={0} value={sillFt} onChange={e => setSillFt(Number(e.target.value) || 0)} />
+
+        <label>Window and door top (ft)</label>
+        <input type="number" step="0.1" min={1} value={topFt} onChange={e => setTopFt(Number(e.target.value) || 1)} />
+
         <label>Ground</label>
         <select value={ground} onChange={e => setGround(e.target.value as GroundType)}>
           {Object.entries(GROUNDS).map(([key, g]) => (
@@ -386,6 +427,9 @@ export default function App() {
             groups={groups}
             dimMode={dimMode}
             ground={ground}
+            roof={{ type: roofType, visible: roofOn, ridgeM: toM(ridgeFt), overhangM: toM(overhangFt) }}
+            stumpM={toM(stumpFt)}
+            spec={{ sillM: toM(sillFt), headM: toM(topFt), doorM: toM(topFt) }}
           />
         ) : (
           <p className="empty">Upload a plan to begin</p>

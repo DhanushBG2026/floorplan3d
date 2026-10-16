@@ -150,3 +150,192 @@
   margin-top: 16px;
   font-size: 13px;
 }
+
+
+
+/* Full-screen floor-plan editor */
+.plan-editor-modal {
+  width: min(1500px, 96vw);
+  height: 94vh;
+  max-height: 94vh;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 18px;
+  gap: 14px;
+}
+
+.plan-editor-header {
+  flex: 0 0 auto;
+}
+
+.plan-editor-header h2 {
+  margin: 0 0 5px;
+}
+
+.plan-editor-header p {
+  margin: 0;
+  color: #64748b;
+  font-size: 13px;
+}
+
+.plan-editor-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 290px;
+  gap: 16px;
+  overflow: hidden;
+}
+
+.plan-preview-pane {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid #d7dce2;
+  border-radius: 9px;
+  background: #202124;
+}
+
+.plan-pane-heading {
+  flex: 0 0 auto;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  color: #fff;
+  font-size: 12px;
+}
+
+.plan-pane-heading h3 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.plan-pane-heading span {
+  color: #b8c0cc;
+}
+
+.plan-image-container {
+  overflow: auto;
+}
+
+.plan-image-container .ReactCrop {
+  max-width: 100%;
+  max-height: 100%;
+  line-height: 0;
+}
+
+.plan-editor-image {
+  display: block;
+  max-width: 100%;
+  max-height: calc(94vh - 150px);
+  width: auto;
+  height: auto;
+  object-fit: contain;
+}
+
+/* Compact, independently scrollable adjustment column */
+.plan-adjustments-pane {
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px;
+  border: 1px solid #d7dce2;
+  border-radius: 9px;
+  background: #f8fafc;
+  color: #1f2937;
+}
+
+.plan-adjustments-pane .adjustments-heading {
+  position: sticky;
+  top: -12px;
+  z-index: 2;
+  background: #f8fafc;
+  padding: 4px 0 12px;
+  margin: 0 0 8px;
+}
+
+.plan-adjustments-pane .adjustments-heading h3 {
+  font-size: 14px;
+}
+
+.plan-adjustments-pane .adjustments-heading button {
+  padding: 5px 8px;
+  font-size: 12px;
+}
+
+.plan-adjustments-pane .adjustment-control {
+  margin: 12px 0 16px;
+}
+
+.plan-adjustments-pane .adjustment-control > span {
+  font-size: 12px;
+  gap: 8px;
+}
+
+.plan-adjustments-pane .adjustment-control input[type="range"] {
+  width: 100%;
+  margin: 5px 0;
+}
+
+.plan-adjustments-pane .adjustment-toggle {
+  font-size: 12px;
+  margin: 16px 0 4px;
+}
+
+/* Keep actions visible at the bottom */
+.plan-editor-footer {
+  flex: 1 1 auto;
+}
+
+/* Narrow screens */
+@media (max-width: 760px) {
+  .plan-editor-modal {
+    height: 96dvh;
+    max-height: 96dvh;
+    padding: 10px;
+  }
+
+  .plan-editor-body {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(220px, 1fr) minmax(150px, 0.8fr);
+    overflow-y: auto;
+  }
+
+  .plan-editor-image {
+      display: block;
+      width: auto;
+      height: auto;
+      max-width: none !important;
+      max-height: none !important;
+      object-fit: initial;
+  }
+
+  .plan-image-canvas .ReactCrop__child-wrapper {
+    max-width: none;
+    max-height: none;
+  }
+
+  .plan-image-canvas .ReactCrop__child-wrapper > img {
+    display: block;
+    max-width: none !important;
+    max-height: none !important;
+  }
+
+
+  .plan-pane-heading span {
+    display: none;
+  }
+
+  .plan-editor-footer button {
+    flex: 1 1 auto;
+  }
+}
+
+.side h3.sub { margin: 18px 0 0; font-size: 13px; color: #9ca3af; font-weight: 600; }
+.side .check { display: flex; gap: 6px; align-items: center; margin-top: 10px; }

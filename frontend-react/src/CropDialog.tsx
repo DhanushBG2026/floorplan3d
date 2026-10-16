@@ -75,37 +75,54 @@ export default function CropDialog({
 
   return (
     <div className="modal-backdrop">
-      <div className="modal">
-        <h2>Prepare floor plan</h2>
-        <p>
-          Select the plan area, then adjust its tones to make walls
-          and openings easier to detect.
-        </p>
-
-        <div className="crop-area">
-          <ReactCrop
-            crop={crop}
-            onChange={(_, pct) => setCrop(pct)}
-            minWidth={30}
-            minHeight={30}
-          >
-            <img
-              src={image}
-              alt="Uploaded floor plan"
-              style={{ filter: previewFilter }}
-            />
-          </ReactCrop>
+    <div className="modal plan-editor-modal">
+      <header className="plan-editor-header">
+        <div>
+          <h2>Prepare floor plan</h2>
+          <p>
+            View the complete plan on the left and adjust image tones on the right.
+          </p>
         </div>
+      </header>
 
-        <section className="image-adjustments">
+      <div className="plan-editor-body">
+        <section className="plan-preview-pane">
+          <div className="plan-pane-heading">
+            <h3>Floor plan</h3>
+            <span>Select the area you want to convert</span>
+          </div>
+
+        <div className="plan-image-container">
+          <div className="plan-image-canvas">
+            <ReactCrop
+              crop={crop}
+              onChange={(_, pct) => setCrop(pct)}
+              minWidth={30}
+              minHeight={30}
+              keepSelection
+            >
+              <img
+                src={image}
+                alt="Uploaded floor plan"
+                className="plan-editor-image"
+                style={{ filter: previewFilter }}
+              />
+            </ReactCrop>
+          </div>
+        </div>
+        </section>
+
+        <aside className="plan-adjustments-pane">
           <div className="adjustments-heading">
             <h3>Image adjustments</h3>
             <button
               type="button"
               className="ghost"
-              onClick={() => onAdjustmentsChange({ ...DEFAULT_ADJUSTMENTS })}
+              onClick={() =>
+                onAdjustmentsChange({ ...DEFAULT_ADJUSTMENTS })
+              }
             >
-              Reset all
+              Reset
             </button>
           </div>
 
@@ -137,21 +154,21 @@ export default function CropDialog({
             />
             Invert image
           </label>
-        </section>
-
-        <div className="modal-actions">
-          <button className="ghost" onClick={onCancel}>Cancel</button>
-          <button
-            className="ghost"
-            onClick={() => onConfirm(null)}
-          >
-            Use full page
-          </button>
-          <button onClick={confirm} disabled={!valid}>
-            Use selected area
-          </button>
-        </div>
+        </aside>
       </div>
+
+      <footer className="plan-editor-footer">
+        <button className="ghost" onClick={onCancel}>
+          Cancel
+        </button>
+        <button className="ghost" onClick={() => onConfirm(null)}>
+          Use full page
+        </button>
+        <button onClick={confirm} disabled={!valid}>
+          Use selected area
+        </button>
+      </footer>
     </div>
+  </div>
   )
 }

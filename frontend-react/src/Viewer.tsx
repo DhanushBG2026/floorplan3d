@@ -8,6 +8,13 @@ import {
 import type { PlanModel, Opening, DimMode } from './types'
 import { GROUNDS, type GroundType } from './ground'
 import type { WallGroups } from './groups'
+import { roofTriangles, type RoofType } from './roof'
+
+
+export interface RoofConfig { type: RoofType; visible: boolean; ridgeM: number; overhangM: number }
+export interface OpeningSpec { sillM: number; headM: number; doorM: number }
+interface Box2 { x0: number; z0: number; x1: number; z1: number }
+
 
 const DOOR_WOOD = '#8a5a32'
 const DOOR_FRAME = '#5c3b1e'
@@ -68,10 +75,10 @@ function Box({
   )
 }
 
-function DoorParts({ o, h }: { o: Opening; h: number }) {
+function DoorParts({ o, h, doorH }: { o: Opening; h: number; doorH: number }) {
   const t = o.thickness
   const c = o.centre
-  const dh = Math.min(DOOR_H, h)   // never taller than the wall
+  const dh = Math.min(doorH, h)   // never taller than the wall
   const f = 0.05
   const leafT = 0.045
   const knobY = Math.min(1.0, dh / 2)
@@ -116,7 +123,15 @@ interface OpeningMeshProps {
   onPick?: (e: ThreeEvent<MouseEvent>) => void
 }
 
-function OpeningMesh({ o, H, selected, onPick }: OpeningMeshProps) {
+interface OpeningMeshProps {
+  o: Opening
+  H: number
+  spec: OpeningSpec
+  selected?: boolean
+  onPick?: (e: ThreeEvent<MouseEvent>) => void
+}
+
+function OpeningMesh({ o, H, spec, selected, onPick }: OpeningMeshProps) {
   const t = o.thickness
   const r = (y0: number, y1: number, color: string, opacity = 1) => {
     const isWall = color === WALL
@@ -132,17 +147,18 @@ function OpeningMesh({ o, H, selected, onPick }: OpeningMeshProps) {
       <Box x0={o.centre - t / 2} z0={o.start} x1={o.centre + t / 2} z1={o.end} {...common} />
     )
   }
-  const top = Math.min(o.type === 'window' ? WIN_TOP : DOOR_H, H)
+  const top = Math.min(o.type === 'window' ? spec.headM : spec.doorM, H)
+  const sill = Math.min(spec.sillM, top)
   return (
     <>
       {r(top, H, WALL)}
       {o.type === 'window' && (
         <>
-          {r(0, Math.min(SILL, top), WALL)}
-          {r(Math.min(SILL, top), top, '#9ad1ff', 0.35)}
+          {r(0, sill, WALL)}
+          {r(sill, top, '#9ad1ff', 0.35)}
         </>
       )}
-      {o.type === 'door' && <DoorParts o={o} h={H} />}
+      {o.type === 'door' && <DoorParts o={o} h={H} doorH={spec.doorM} />}
     </>
   )
 }
@@ -285,6 +301,64 @@ function Lights({ cx, cz, size }: { cx: number; cz: number; size: number }) {
   )
 }
 
+function Roof({ cfg, box, eaveY }: { cfg: RoofConfig; box: Box2; eaveY: number }) {
+  const geo = useMemo(() => {
+    if (cfg.type === 'none') return null
+    const t = roofTriangles({ type: cfg.type, ...box, eaveY, ridgeY: cfg.ridgeM, overhang: cfg.overhangM })
+    if (!t.roof.length) return null
+    const make = (pos: number[]) => {
+      const g = new THREE.BufferGeometry()
+      g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3))
+      g.computeVertexNormals()
+      return g
+    }
+    return { roof: make(t.roof), gables: t.gables.length ? make(t.gables) : null }
+  }, [cfg.type, cfg.ridgeM, cfg.overhangM, box.x0, box.z0, box.x1, box.z1, eaveY])
+
+  if (!geo || !cfg.visible) return null
+  return (
+    <>
+      <mesh geometry={geo.roof} castShadow receiveShadow>
+        <meshStandardMaterial color="#8f9ca8" roughness={0.55} metalness={0.25} side={THREE.DoubleSide} />
+      </mesh>
+      {geo.gables && (
+        <mesh geometry={geo.gables} castShadow receiveShadow>
+          <meshStandardMaterial color={WALL} side={THREE.DoubleSide} />
+        </mesh>
+      )}
+    </>
+  )
+}
+
+function Stumps({ box, height }: { box: Box2; height: number }) {
+  if (height < 0.15) return null
+  const inset = 0.25
+  const w = box.x1 - box.x0
+  const d = box.z1 - box.z0
+  const nx = Math.max(2, Math.ceil(w / 2.4) + 1)
+  const nz = Math.max(2, Math.ceil(d / 2.4) + 1)
+  const posts: [number, number][] = []
+  for (let i = 0; i < nx; i++) {
+    for (let j = 0; j < nz; j++) {
+      posts.push([
+        box.x0 + inset + ((w - 2 * inset) * i) / (nx - 1),
+        box.z0 + inset + ((d - 2 * inset) * j) / (nz - 1),
+      ])
+    }
+  }
+  const h = height - 0.1 // the floor slab is 0.1 m thick and sits on top of the posts
+  return (
+    <>
+      {posts.map(([x, z], i) => (
+        <mesh key={i} position={[x, h / 2, z]} castShadow receiveShadow>
+          <boxGeometry args={[0.15, h, 0.15]} />
+          <meshStandardMaterial color="#9a9a94" roughness={0.9} />
+        </mesh>
+      ))}
+    </>
+  )
+}
+
 // ---------- Viewer ----------
 interface ViewerProps {
   model: PlanModel
@@ -297,16 +371,27 @@ interface ViewerProps {
   dimMode: DimMode
   ground: GroundType
   groups: WallGroups
+  roof: RoofConfig
+  stumpM: number
+  spec: OpeningSpec
 }
 
  export default function Viewer({
-  model, wallH, heights = {}, thicknesses = {}, deleted = [], selectedIds = [], onSelect, dimMode, ground, groups,
+  model, wallH, heights = {}, thicknesses = {}, deleted = [], selectedIds = [], onSelect, dimMode, ground, groups, roof, stumpM, spec,
   }: ViewerProps) {
   const b = model.bounds
   const cx = (b.x0 + b.x1) / 2
   const cz = (b.y0 + b.y1) / 2
   const size = Math.max(b.x1 - b.x0, b.y1 - b.y0, 4)  
   const visibleWalls = model.walls.filter(w => !deleted.includes(w.id))
+  const roofBox: Box2 = visibleWalls.length
+    ? {
+        x0: Math.min(...visibleWalls.map(w => w.x0)),
+        z0: Math.min(...visibleWalls.map(w => w.y0)),
+        x1: Math.max(...visibleWalls.map(w => w.x1)),
+        z1: Math.max(...visibleWalls.map(w => w.y1)),
+      }
+    : { x0: b.x0, z0: b.y0, x1: b.x1, z1: b.y1 }
   const visibleOpenings = model.openings.filter(o => {
   const gid = groups.openingGroup[o.id]
   return gid === undefined || !deleted.includes(gid)
@@ -343,53 +428,113 @@ interface ViewerProps {
         <Ground type={ground} cx={cx} cz={cz} size={size} />
       </Suspense>
 
-      {/* floor slab */}
-      <Box x0={b.x0} z0={b.y0} x1={b.x1} z1={b.y1} y0={-0.1} y1={0} color="#2b2d34" />
+      
+      <group position={[0, stumpM, 0]}>
+        {/* Floor slab */}
+        <Box
+          x0={b.x0}
+          z0={b.y0}
+          x1={b.x1}
+          z1={b.y1}
+          y0={-0.1}
+          y1={0}
+          color="#2b2d34"
+        />
 
-      {/* walls: click to select */}
+        {/* Walls */}
         {visibleWalls.map(w => {
-        const t = thicknesses[w.id] ?? w.thickness
-        const mx = (w.x0 + w.x1) / 2
-        const mz = (w.y0 + w.y1) / 2
-        // thickness is applied around the wall's centreline
-        const x0 = w.horizontal ? w.x0 : mx - t / 2
-        const x1 = w.horizontal ? w.x1 : mx + t / 2
-        const z0 = w.horizontal ? mz - t / 2 : w.y0
-        const z1 = w.horizontal ? mz + t / 2 : w.y1
-        return (
-          <Box key={w.id} x0={x0} z0={z0} x1={x1} z1={z1}
-            y0={0} y1={heights[w.id] ?? wallH} color={WALL} edges glossy
-            shrink={w.horizontal ? 0 : 0.004}
-            selected={selectedIds.includes(w.id)}
-            onClick={e => {
-              e.stopPropagation()
-              onSelect(w.id, e.nativeEvent.ctrlKey || e.nativeEvent.metaKey)
-            }} />
-        )
-      })}
+          const t = thicknesses[w.id] ?? w.thickness
+          const mx = (w.x0 + w.x1) / 2
+          const mz = (w.y0 + w.y1) / 2
 
-      {visibleOpenings.map(o => {
-        const gid = groups.openingGroup[o.id]
-        const has = gid !== undefined
-        const H = has ? (heights[gid] ?? wallH) : wallH
-        const t = has ? (thicknesses[gid] ?? o.thickness) : o.thickness
-        return (
-          <OpeningMesh
-            key={o.id}
-            o={{ ...o, thickness: t }}
-            H={H}
-            selected={has && selectedIds.includes(gid)}
-            onPick={has ? e => {
-              e.stopPropagation()
-              onSelect(gid, e.nativeEvent.ctrlKey || e.nativeEvent.metaKey)
-            } : undefined}
-          />
-        )
-      })}
+          const x0 = w.horizontal ? w.x0 : mx - t / 2
+          const x1 = w.horizontal ? w.x1 : mx + t / 2
+          const z0 = w.horizontal ? mz - t / 2 : w.y0
+          const z1 = w.horizontal ? mz + t / 2 : w.y1
 
-          <Dimensions model={{ ...model, walls: visibleWalls, openings: visibleOpenings }} H={wallH} mode={dimMode} scale={size * 1.6} />
+          return (
+            <Box
+              key={w.id}
+              x0={x0}
+              z0={z0}
+              x1={x1}
+              z1={z1}
+              y0={0}
+              y1={heights[w.id] ?? wallH}
+              color={WALL}
+              edges
+              glossy
+              shrink={w.horizontal ? 0 : 0.004}
+              selected={selectedIds.includes(w.id)}
+              onClick={e => {
+                e.stopPropagation()
+                onSelect(
+                  w.id,
+                  e.nativeEvent.ctrlKey || e.nativeEvent.metaKey
+                )
+              }}
+            />
+          )
+        })}
 
-      <OrbitControls makeDefault enableDamping target={[cx, wallH / 2, cz]} />
+        {/* Doors and windows */}
+        {visibleOpenings.map(o => {
+          const gid = groups.openingGroup[o.id]
+          const has = gid !== undefined
+          const H = has ? (heights[gid] ?? wallH) : wallH
+          const t = has
+            ? (thicknesses[gid] ?? o.thickness)
+            : o.thickness
+
+          return (
+            <OpeningMesh
+              key={o.id}
+              o={{ ...o, thickness: t }}
+              H={H}
+              spec={spec}
+              selected={has && selectedIds.includes(gid)}
+              onPick={
+                has
+                  ? e => {
+                      e.stopPropagation()
+                      onSelect(
+                        gid,
+                        e.nativeEvent.ctrlKey ||
+                          e.nativeEvent.metaKey
+                      )
+                    }
+                  : undefined
+              }
+            />
+          )
+        })}
+
+        {/* Dimensions */}
+        <Dimensions
+          model={{
+            ...model,
+            walls: visibleWalls,
+            openings: visibleOpenings,
+          }}
+          H={wallH}
+          mode={dimMode}
+          scale={size * 1.6}
+        />
+
+        {/* Roof */}
+        <Roof cfg={roof} box={roofBox} eaveY={wallH} />
+      </group>
+
+      {/* Supporting stumps */}
+      <Stumps box={roofBox} height={stumpM} />
+
+      {/* Camera controls */}
+      <OrbitControls
+        makeDefault
+        enableDamping
+        target={[cx, stumpM + wallH / 2, cz]}
+      />
+
     </Canvas>
   )
 }
