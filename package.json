@@ -2,9 +2,11 @@
   "dependencies": {
     "@react-three/drei": "^10.7.9",
     "@react-three/fiber": "^9.8.1",
+    "cesium": "^1.146.0",
     "three": "^0.186.1"
   },
   "devDependencies": {
-    "@types/three": "^0.186.0"
+    "@types/three": "^0.186.0",
+    "vite-plugin-cesium": "^1.2.23"
   }
 }

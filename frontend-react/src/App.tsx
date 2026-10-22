@@ -15,6 +15,7 @@ import {
 import CropDialog, { type CropBox } from './CropDialog'
 import ChatPanel from './ChatPanel'
 import type { RoofType } from './roof'
+import { WALL_FINISHES, ROOF_FINISHES, DEFAULT_ROOF_COLOR, type WallFinishKey, type RoofFinishKey } from './materials'
 
 interface DeleteHistory { past: number[][]; present: number[]; future: number[][] }
 const EMPTY_HIST: DeleteHistory = { past: [], present: [], future: [] }
@@ -49,6 +50,9 @@ export default function App() {
   const [stumpFt, setStumpFt] = useState(0)
   const [sillFt, setSillFt] = useState(2.95)
   const [topFt, setTopFt] = useState(6.9)
+  const [wallFinish, setWallFinish] = useState<WallFinishKey>('plaster')
+  const [roofFinish, setRoofFinish] = useState<RoofFinishKey>('metal')
+  const [roofColor, setRoofColor] = useState(DEFAULT_ROOF_COLOR)
 
 
   const onFileChosen = async (f: File | null) => {
@@ -285,12 +289,27 @@ export default function App() {
           <option value="flat">Flat</option>
         </select>
 
+        <label>Wall finish</label>
+        <select value={wallFinish} onChange={e => setWallFinish(e.target.value as WallFinishKey)}>
+          {Object.entries(WALL_FINISHES).map(([key, f]) => (
+            <option key={key} value={key}>{f.label}</option>
+          ))}
+        </select>
+
         {roofType !== 'none' && (
           <>
             <label className="check">
               <input type="checkbox" checked={roofOn} onChange={e => setRoofOn(e.target.checked)} />
               Show roof
             </label>
+            <label>Roof finish</label>
+            <select value={roofFinish} onChange={e => setRoofFinish(e.target.value as RoofFinishKey)}>
+              {Object.entries(ROOF_FINISHES).map(([key, f]) => (
+                <option key={key} value={key}>{f.label}</option>
+              ))}
+            </select>
+            <label>Roof colour</label>
+            <input type="color" value={roofColor} onChange={e => setRoofColor(e.target.value)} />
             <label>Ridge or high point, above floor (ft)</label>
             <input type="number" step="0.1" value={ridgeFt} onChange={e => setRidgeFt(Number(e.target.value) || 0)} />
             <label>Roof overhang (ft)</label>
@@ -430,6 +449,7 @@ export default function App() {
             roof={{ type: roofType, visible: roofOn, ridgeM: toM(ridgeFt), overhangM: toM(overhangFt) }}
             stumpM={toM(stumpFt)}
             spec={{ sillM: toM(sillFt), headM: toM(topFt), doorM: toM(topFt) }}
+            finish={{ wall: WALL_FINISHES[wallFinish], roof: ROOF_FINISHES[roofFinish], roofColor }}
           />
         ) : (
           <p className="empty">Upload a plan to begin</p>

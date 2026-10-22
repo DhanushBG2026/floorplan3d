@@ -92,3 +92,34 @@ export function roofTriangles(p: RoofInput): RoofTriangles {
   }
   return { roof, gables }
 }
+
+// Texture coordinates for a flat-shaded triangle list (9 numbers per triangle): every triangle is
+// projected onto its own plane, in metres divided by `tile`, so a texture keeps its real-world size.
+export function planarUVs(pos: number[], tile: number, swap = false): number[] {
+  const uv: number[] = []
+  const sub = (a: number[], b: number[]) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+  const cross = (a: number[], b: number[]) => [
+    a[1] * b[2] - a[2] * b[1],
+    a[2] * b[0] - a[0] * b[2],
+    a[0] * b[1] - a[1] * b[0],
+  ]
+  const len = (a: number[]) => Math.hypot(a[0], a[1], a[2])
+  const unit = (a: number[], fallback: number[]) => {
+    const l = len(a)
+    return l < 1e-9 ? fallback : [a[0] / l, a[1] / l, a[2] / l]
+  }
+  const dot = (a: number[], b: number[]) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+
+  for (let i = 0; i + 8 < pos.length; i += 9) {
+    const p = [0, 1, 2].map(k => [pos[i + k * 3], pos[i + k * 3 + 1], pos[i + k * 3 + 2]])
+    const n = unit(cross(sub(p[1], p[0]), sub(p[2], p[0])), [0, 1, 0])
+    const u = unit(cross(n, [0, 1, 0]), [1, 0, 0]) // horizontal direction inside the plane
+    const v = unit(cross(n, u), [0, 0, 1])
+    for (const q of p) {
+      const a = dot(q, u) / tile
+      const b = dot(q, v) / tile
+      uv.push(swap ? b : a, swap ? a : b)
+    }
+  }
+  return uv
+}

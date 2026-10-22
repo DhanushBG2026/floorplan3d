@@ -1,14 +1,15 @@
-import { Suspense, useMemo, useRef, useEffect } from 'react'
+import { Component, Suspense, createContext, useContext, useEffect, useMemo, useRef, type ReactNode } from 'react'
 import * as THREE from 'three'
-import { fmtFtIn } from './units'
 import { Canvas, useThree, type ThreeEvent } from '@react-three/fiber'
 import {
   OrbitControls, Html, Line, Edges, useTexture, Environment, Lightformer, Sky,
 } from '@react-three/drei'
 import type { PlanModel, Opening, DimMode } from './types'
-import { GROUNDS, type GroundType } from './ground'
 import type { WallGroups } from './groups'
-import { roofTriangles, type RoofType } from './roof'
+import { GROUNDS, type GroundType } from './ground'
+import { fmtFtIn } from './units'
+import { roofTriangles, planarUVs, type RoofType } from './roof'
+import { WALL_FINISHES, ROOF_FINISHES, DEFAULT_ROOF_COLOR, type Finish } from './materials'
 
 
 export interface RoofConfig { type: RoofType; visible: boolean; ridgeM: number; overhangM: number }
@@ -40,13 +41,110 @@ interface BoxProps {
   onClick?: (e: ThreeEvent<MouseEvent>) => void
 }
 
+export interface FinishConfig { wall: Finish; roof: Finish; roofColor: string }
+
+const FinishContext = createContext<FinishConfig>({
+  wall: WALL_FINISHES.plain,
+  roof: ROOF_FINISHES.plain,
+  roofColor: DEFAULT_ROOF_COLOR,
+})
+
+// If a texture file is missing, show a plain colour instead of crashing the whole viewer.
+class TexBoundary extends Component<{ fallback: ReactNode; children: ReactNode }, { failed: boolean }> {
+  state = { failed: false }
+  static getDerivedStateFromError() { return { failed: true } }
+  componentDidCatch(e: unknown) { console.warn('Texture failed to load, using a plain colour instead.', e) }
+  render() { return this.state.failed ? this.props.fallback : this.props.children }
+}
+
+interface SurfaceProps { finish: Finish; tint?: string; selected?: boolean; side?: THREE.Side }
+
+function PlainSurface({ finish, tint, selected, side }: SurfaceProps) {
+  return (
+    <meshPhysicalMaterial
+      color={tint ?? finish.color}
+      roughness={finish.roughness}
+      metalness={finish.metalness}
+      clearcoat={finish.map ? 0 : 1}
+      clearcoatRoughness={0.1}
+      emissive={selected ? '#3b82f6' : '#000000'}
+      emissiveIntensity={selected ? 0.4 : 0}
+      side={side}
+    />
+  )
+}
+
+function TexturedSurface({ finish, tint, selected, side }: SurfaceProps) {
+  const maps = useTexture({
+    map: finish.map as string,
+    ...(finish.normal ? { normalMap: finish.normal } : {}),
+  }) as { map: THREE.Texture; normalMap?: THREE.Texture }
+
+  useEffect(() => {
+    maps.map.colorSpace = THREE.SRGBColorSpace
+    for (const t of [maps.map, maps.normalMap]) {
+      if (!t) continue
+      t.wrapS = t.wrapT = THREE.RepeatWrapping
+      t.anisotropy = 8
+      t.needsUpdate = true
+    }
+  }, [maps.map, maps.normalMap])
+
+  return (
+    <meshPhysicalMaterial
+      map={maps.map}
+      normalMap={maps.normalMap}
+      color={tint ?? '#ffffff'}
+      roughness={finish.roughness}
+      metalness={finish.metalness}
+      emissive={selected ? '#3b82f6' : '#000000'}
+      emissiveIntensity={selected ? 0.4 : 0}
+      side={side}
+    />
+  )
+}
+
+function Surface(props: SurfaceProps) {
+  const plain = <PlainSurface {...props} />
+  if (!props.finish.map) return plain
+  return (
+    <TexBoundary fallback={plain}>
+      <Suspense fallback={plain}>
+        <TexturedSurface {...props} />
+      </Suspense>
+    </TexBoundary>
+  )
+}
+
+// A box whose texture coordinates are in metres, so patterns keep their real size on every wall.
+function scaledBoxGeometry(w: number, h: number, d: number, tile: number) {
+  const g = new THREE.BoxGeometry(w, h, d)
+  const uv = g.attributes.uv as THREE.BufferAttribute
+  const size: [number, number][] = [[d, h], [d, h], [w, d], [w, d], [w, h], [w, h]] // +x -x +y -y +z -z
+  for (let f = 0; f < 6; f++) {
+    for (let i = 0; i < 4; i++) {
+      const k = f * 4 + i
+      uv.setXY(k, (uv.getX(k) * size[f][0]) / tile, (uv.getY(k) * size[f][1]) / tile)
+    }
+  }
+  uv.needsUpdate = true
+  return g
+}
+
+
 function Box({
   x0, z0, x1, z1, y0, y1, color, opacity = 1, shrink = 0, edges, glossy, selected, onClick,
 }: BoxProps) {
+  const { wall } = useContext(FinishContext)
   const w = x1 - x0
   const d = z1 - z0
   const h = y1 - y0 - shrink
-  if (w <= 0 || d <= 0 || h <= 0) return null
+  const tile = glossy ? wall.tileM : 1
+  const valid = w > 0 && d > 0 && h > 0
+  const geometry = useMemo(() => (valid ? scaledBoxGeometry(w, h, d, tile) : null), [valid, w, h, d, tile])
+  useEffect(() => () => geometry?.dispose(), [geometry])
+  if (!geometry) return null
+
   return (
     <mesh
       position={[(x0 + x1) / 2, y0 + h / 2, (z0 + z1) / 2]}
@@ -56,17 +154,9 @@ function Box({
       onPointerOver={onClick ? e => { e.stopPropagation(); document.body.style.cursor = 'pointer' } : undefined}
       onPointerOut={onClick ? () => { document.body.style.cursor = 'auto' } : undefined}
     >
-      <boxGeometry args={[w, h, d]} />
+      <primitive object={geometry} attach="geometry" />
       {glossy ? (
-        <meshPhysicalMaterial
-          color={color}
-          roughness={0.25}
-          metalness={0.05}
-          clearcoat={1}
-          clearcoatRoughness={0.1}
-          emissive={selected ? '#3b82f6' : '#000000'}
-          emissiveIntensity={selected ? 0.4 : 0}
-        />
+        <Surface finish={wall} selected={selected} />
       ) : (
         <meshStandardMaterial color={color} transparent={opacity < 1} opacity={opacity} />
       )}
@@ -302,28 +392,34 @@ function Lights({ cx, cz, size }: { cx: number; cz: number; size: number }) {
 }
 
 function Roof({ cfg, box, eaveY }: { cfg: RoofConfig; box: Box2; eaveY: number }) {
+  const { wall, roof: roofFinish, roofColor } = useContext(FinishContext)
   const geo = useMemo(() => {
     if (cfg.type === 'none') return null
     const t = roofTriangles({ type: cfg.type, ...box, eaveY, ridgeY: cfg.ridgeM, overhang: cfg.overhangM })
     if (!t.roof.length) return null
-    const make = (pos: number[]) => {
+    const make = (pos: number[], tile: number, swap: boolean) => {
       const g = new THREE.BufferGeometry()
       g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3))
+      g.setAttribute('uv', new THREE.Float32BufferAttribute(planarUVs(pos, tile, swap), 2))
       g.computeVertexNormals()
       return g
     }
-    return { roof: make(t.roof), gables: t.gables.length ? make(t.gables) : null }
-  }, [cfg.type, cfg.ridgeM, cfg.overhangM, box.x0, box.z0, box.x1, box.z1, eaveY])
+    return {
+      roof: make(t.roof, roofFinish.tileM, !!roofFinish.swapUV),
+      gables: t.gables.length ? make(t.gables, wall.tileM, false) : null,
+    }
+  }, [cfg.type, cfg.ridgeM, cfg.overhangM, box.x0, box.z0, box.x1, box.z1, eaveY,
+      roofFinish.tileM, roofFinish.swapUV, wall.tileM])
 
   if (!geo || !cfg.visible) return null
   return (
     <>
       <mesh geometry={geo.roof} castShadow receiveShadow>
-        <meshStandardMaterial color="#8f9ca8" roughness={0.55} metalness={0.25} side={THREE.DoubleSide} />
+        <Surface finish={roofFinish} tint={roofColor} side={THREE.DoubleSide} />
       </mesh>
       {geo.gables && (
         <mesh geometry={geo.gables} castShadow receiveShadow>
-          <meshStandardMaterial color={WALL} side={THREE.DoubleSide} />
+          <Surface finish={wall} side={THREE.DoubleSide} />
         </mesh>
       )}
     </>
@@ -374,10 +470,11 @@ interface ViewerProps {
   roof: RoofConfig
   stumpM: number
   spec: OpeningSpec
+  finish: FinishConfig
 }
 
  export default function Viewer({
-  model, wallH, heights = {}, thicknesses = {}, deleted = [], selectedIds = [], onSelect, dimMode, ground, groups, roof, stumpM, spec,
+  model, wallH, heights = {}, thicknesses = {}, deleted = [], selectedIds = [], onSelect, dimMode, ground, groups, roof, stumpM, spec, finish,
   }: ViewerProps) {
   const b = model.bounds
   const cx = (b.x0 + b.x1) / 2
@@ -428,102 +525,103 @@ interface ViewerProps {
         <Ground type={ground} cx={cx} cz={cz} size={size} />
       </Suspense>
 
-      
-      <group position={[0, stumpM, 0]}>
-        {/* Floor slab */}
-        <Box
-          x0={b.x0}
-          z0={b.y0}
-          x1={b.x1}
-          z1={b.y1}
-          y0={-0.1}
-          y1={0}
-          color="#2b2d34"
-        />
+      <FinishContext.Provider value={finish}>
+        <group position={[0, stumpM, 0]}>
+          {/* Floor slab */}
+          <Box
+            x0={b.x0}
+            z0={b.y0}
+            x1={b.x1}
+            z1={b.y1}
+            y0={-0.1}
+            y1={0}
+            color="#2b2d34"
+          />
 
-        {/* Walls */}
-        {visibleWalls.map(w => {
-          const t = thicknesses[w.id] ?? w.thickness
-          const mx = (w.x0 + w.x1) / 2
-          const mz = (w.y0 + w.y1) / 2
+          {/* Walls */}
+          {visibleWalls.map(w => {
+            const t = thicknesses[w.id] ?? w.thickness
+            const mx = (w.x0 + w.x1) / 2
+            const mz = (w.y0 + w.y1) / 2
 
-          const x0 = w.horizontal ? w.x0 : mx - t / 2
-          const x1 = w.horizontal ? w.x1 : mx + t / 2
-          const z0 = w.horizontal ? mz - t / 2 : w.y0
-          const z1 = w.horizontal ? mz + t / 2 : w.y1
+            const x0 = w.horizontal ? w.x0 : mx - t / 2
+            const x1 = w.horizontal ? w.x1 : mx + t / 2
+            const z0 = w.horizontal ? mz - t / 2 : w.y0
+            const z1 = w.horizontal ? mz + t / 2 : w.y1
 
-          return (
-            <Box
-              key={w.id}
-              x0={x0}
-              z0={z0}
-              x1={x1}
-              z1={z1}
-              y0={0}
-              y1={heights[w.id] ?? wallH}
-              color={WALL}
-              edges
-              glossy
-              shrink={w.horizontal ? 0 : 0.004}
-              selected={selectedIds.includes(w.id)}
-              onClick={e => {
-                e.stopPropagation()
-                onSelect(
-                  w.id,
-                  e.nativeEvent.ctrlKey || e.nativeEvent.metaKey
-                )
-              }}
-            />
-          )
-        })}
+            return (
+              <Box
+                key={w.id}
+                x0={x0}
+                z0={z0}
+                x1={x1}
+                z1={z1}
+                y0={0}
+                y1={heights[w.id] ?? wallH}
+                color={WALL}
+                edges
+                glossy
+                shrink={w.horizontal ? 0 : 0.004}
+                selected={selectedIds.includes(w.id)}
+                onClick={e => {
+                  e.stopPropagation()
+                  onSelect(
+                    w.id,
+                    e.nativeEvent.ctrlKey || e.nativeEvent.metaKey
+                  )
+                }}
+              />
+            )
+          })}
 
-        {/* Doors and windows */}
-        {visibleOpenings.map(o => {
-          const gid = groups.openingGroup[o.id]
-          const has = gid !== undefined
-          const H = has ? (heights[gid] ?? wallH) : wallH
-          const t = has
-            ? (thicknesses[gid] ?? o.thickness)
-            : o.thickness
+          {/* Doors and windows */}
+          {visibleOpenings.map(o => {
+            const gid = groups.openingGroup[o.id]
+            const has = gid !== undefined
+            const H = has ? (heights[gid] ?? wallH) : wallH
+            const t = has
+              ? (thicknesses[gid] ?? o.thickness)
+              : o.thickness
 
-          return (
-            <OpeningMesh
-              key={o.id}
-              o={{ ...o, thickness: t }}
-              H={H}
-              spec={spec}
-              selected={has && selectedIds.includes(gid)}
-              onPick={
-                has
-                  ? e => {
-                      e.stopPropagation()
-                      onSelect(
-                        gid,
-                        e.nativeEvent.ctrlKey ||
-                          e.nativeEvent.metaKey
-                      )
-                    }
-                  : undefined
-              }
-            />
-          )
-        })}
+            return (
+              <OpeningMesh
+                key={o.id}
+                o={{ ...o, thickness: t }}
+                H={H}
+                spec={spec}
+                selected={has && selectedIds.includes(gid)}
+                onPick={
+                  has
+                    ? e => {
+                        e.stopPropagation()
+                        onSelect(
+                          gid,
+                          e.nativeEvent.ctrlKey ||
+                            e.nativeEvent.metaKey
+                        )
+                      }
+                    : undefined
+                }
+              />
+            )
+          })}
 
-        {/* Dimensions */}
-        <Dimensions
-          model={{
-            ...model,
-            walls: visibleWalls,
-            openings: visibleOpenings,
-          }}
-          H={wallH}
-          mode={dimMode}
-          scale={size * 1.6}
-        />
+          {/* Dimensions */}
+          <Dimensions
+            model={{
+              ...model,
+              walls: visibleWalls,
+              openings: visibleOpenings,
+            }}
+            H={wallH}
+            mode={dimMode}
+            scale={size * 1.6}
+          />
 
-        {/* Roof */}
-        <Roof cfg={roof} box={roofBox} eaveY={wallH} />
-      </group>
+          {/* Roof */}
+          <Roof cfg={roof} box={roofBox} eaveY={wallH} />
+        </group>
+      </FinishContext.Provider>
 
       {/* Supporting stumps */}
       <Stumps box={roofBox} height={stumpM} />

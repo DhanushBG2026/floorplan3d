@@ -339,3 +339,5 @@
 
 .side h3.sub { margin: 18px 0 0; font-size: 13px; color: #9ca3af; font-weight: 600; }
 .side .check { display: flex; gap: 6px; align-items: center; margin-top: 10px; }
+
+.side input[type='color'] { width: 100%; height: 36px; padding: 2px; background: #26262c; border: 1px solid #3a3a42; border-radius: 6px; }
