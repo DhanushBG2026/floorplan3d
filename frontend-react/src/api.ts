@@ -30,11 +30,13 @@ export interface ConvertOptions {
   pxPerM: number
   crop?: [number, number, number, number] | null
   adjustments?: ImageAdjustments
+  detector?: 'opencv' | 'ml'
 }
 
 export async function convertPlan(file: File, o: ConvertOptions): Promise<PlanModel> {
   const fd = new FormData()
   fd.append('file', file)
+  fd.append('detector', o.detector ?? 'opencv')
   fd.append('drawing_scale', String(o.drawingScale || 100))
   fd.append('known_width_m', String(o.knownWidthM || 0))
   fd.append('px_per_m', String(o.pxPerM || 0))

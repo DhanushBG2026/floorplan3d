@@ -29,6 +29,8 @@ export function buildGroups(model: PlanModel, tol = 0.1): WallGroups {
     let before: number | null = null
     let after: number | null = null
     for (const w of model.walls) {
+      
+      if (w.diagonal) continue
       if (w.horizontal !== o.horizontal) continue
       const centre = o.horizontal ? (w.y0 + w.y1) / 2 : (w.x0 + w.x1) / 2
       if (Math.abs(centre - o.centre) > Math.max(tol, o.thickness / 2)) continue
@@ -56,7 +58,13 @@ export function buildGroups(model: PlanModel, tol = 0.1): WallGroups {
     const g = find(w.id)
     groupOf[w.id] = g
     ;(members[g] ??= []).push(w.id)
+    if (w.diagonal) {
+    // a diagonal wall is its own group; remember its real length
+    lo[g] = 0
+    hi[g] = w.length
+    } else {
     extend(g, w.horizontal ? w.x0 : w.y0, w.horizontal ? w.x1 : w.y1)
+    }
   }
   for (const o of model.openings) {
     if (attach[o.id] === undefined) continue

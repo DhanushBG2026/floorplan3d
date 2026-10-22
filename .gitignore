@@ -6,4 +6,8 @@
 .venv/
 __pycache__/
 node_modules/
-ml/
+ml/data/
+ml/output/*
+!ml/output/best_unet_v5.pth
+ml/predictions/*
+ml/__pycache__/*

@@ -16,6 +16,9 @@ import CropDialog, { type CropBox } from './CropDialog'
 import ChatPanel from './ChatPanel'
 import type { RoofType } from './roof'
 import { WALL_FINISHES, ROOF_FINISHES, DEFAULT_ROOF_COLOR, type WallFinishKey, type RoofFinishKey } from './materials'
+import { applyExtensions, groupAxis, snapCoordinate, clampExt, type Ext } from './extend'
+
+type DimensionUnit = 'ft-in' | 'm' | 'cm' | 'mm' | 'in'
 
 interface DeleteHistory { past: number[][]; present: number[]; future: number[][] }
 const EMPTY_HIST: DeleteHistory = { past: [], present: [], future: [] }
@@ -27,6 +30,7 @@ export default function App() {
   const [ppm, setPpm] = useState('')
   const [wallH, setWallH] = useState(9)
   const [dimMode, setDimMode] = useState<DimMode>('overall')
+  const [dimensionUnit, setDimensionUnit] = useState<DimensionUnit>('ft-in')
   const [model, setModel] = useState<PlanModel | null>(null)
   const [status, setStatus] = useState('')
   const [loading, setLoading] = useState(false)
@@ -43,7 +47,7 @@ export default function App() {
   const groups = useMemo(() => (model ? buildGroups(model) : null), [model])
   const [docText, setDocText] = useState('')
   const [adjustments, setAdjustments] = useState<ImageAdjustments>({ ...DEFAULT_ADJUSTMENTS })
-  const [roofType, setRoofType] = useState<RoofType>('none')
+  const [roofType, setRoofType] = useState<RoofType | 'design'>('none')
   const [roofOn, setRoofOn] = useState(true)
   const [ridgeFt, setRidgeFt] = useState(10.8)
   const [overhangFt, setOverhangFt] = useState(1)
@@ -53,6 +57,9 @@ export default function App() {
   const [wallFinish, setWallFinish] = useState<WallFinishKey>('plaster')
   const [roofFinish, setRoofFinish] = useState<RoofFinishKey>('metal')
   const [roofColor, setRoofColor] = useState(DEFAULT_ROOF_COLOR)
+  const [detector, setDetector] = useState<'opencv' | 'ml'>('opencv')
+  const [extensions, setExtensions] = useState<Record<number, Ext>>({})
+  const [snapOn, setSnapOn] = useState(true)
 
 
   const onFileChosen = async (f: File | null) => {
@@ -83,15 +90,26 @@ export default function App() {
     try {
       const m = await convertPlan(file, {
         drawingScale: scale,
+        detector,
         knownWidthM: toM(parseFloat(knownW) || 0),
         pxPerM: (parseFloat(ppm) || 0) / FT,
         crop,
         adjustments,
       })
       setModel(m)
+      const d = m.design
+      if (d?.roof) {
+        setRoofType('design')
+        setRoofOn(true)
+        if (d.levels?.wallTop) setWallH(Number(toFt(d.levels.wallTop).toFixed(2)))
+        setStumpFt(prev => prev || 2)          // deck needs a raised floor; tweak as you like
+      } else if (roofType === 'design') {
+        setRoofType('none')
+      }
       setHeights({})
       setThicknesses({})
       setHeights({})
+      setExtensions({})
       setThicknesses({})
       setHist(EMPTY_HIST)
       setSelectedIds([])
@@ -185,11 +203,32 @@ export default function App() {
       membersOf(gid).forEach(id => { delete n[id] })
       return n
     })
+    setExtensions(x => { const n = { ...x }; delete n[gid]; return n })
     setThicknesses(t => {
       const n = { ...t }
       membersOf(gid).forEach(id => { delete n[id] })
       return n
     })
+  }
+
+    const axis = model && groups && selectedWall ? groupAxis(model.walls, groups, selectedWall.id) : null
+  const selExt: Ext = selectedWall ? (extensions[selectedWall.id] ?? { start: 0, end: 0 }) : { start: 0, end: 0 }
+
+  const setExtension = (gid: number, e: Ext) => setExtensions(x => ({ ...x, [gid]: e }))
+
+  const setEnd = (which: 'start' | 'end', metres: number) => {
+    if (!selectedWall || !axis || !Number.isFinite(metres)) return
+    setExtension(selectedWall.id, clampExt(axis, { ...selExt, [which]: metres }))
+  }
+
+  // pull both ends to the nearest wall within 1.5 m
+  const snapEnds = () => {
+    if (!selectedWall || !axis || !model || !groups || axis.diagonal) return
+    const ws = applyExtensions(model.walls, groups, extensions).filter(w => !deleted.includes(w.id))
+    const skip = groups.members[selectedWall.id] ?? []
+    const a = snapCoordinate({ walls: ws, skip, horizontal: axis.horizontal, perp: axis.perp, value: axis.loBase - selExt.start, threshold: 1.5 })
+    const z = snapCoordinate({ walls: ws, skip, horizontal: axis.horizontal, perp: axis.perp, value: axis.hiBase + selExt.end, threshold: 1.5 })
+    setExtension(selectedWall.id, clampExt(axis, { start: axis.loBase - a.value, end: z.value - axis.hiBase }))
   }
 
       const deleteWalls = (ids: number[]) => {
@@ -281,7 +320,8 @@ export default function App() {
         <h3 className="sub">Roof and levels</h3>
 
         <label>Roof</label>
-        <select value={roofType} onChange={e => setRoofType(e.target.value as RoofType)}>
+        <select value={roofType} onChange={e => setRoofType(e.target.value as RoofType | 'design')}>
+          {model?.design?.roof && <option value="design">From PDF ({model.design.roof.type})</option>}
           <option value="none">None</option>
           <option value="gable">Gable</option>
           <option value="hip">Hip</option>
@@ -310,8 +350,12 @@ export default function App() {
             </select>
             <label>Roof colour</label>
             <input type="color" value={roofColor} onChange={e => setRoofColor(e.target.value)} />
-            <label>Ridge or high point, above floor (ft)</label>
-            <input type="number" step="0.1" value={ridgeFt} onChange={e => setRidgeFt(Number(e.target.value) || 0)} />
+            {roofType !== 'design' && (
+              <>
+                <label>Ridge or high point, above floor (ft)</label>
+                <input type="number" step="0.1" value={ridgeFt} onChange={e => setRidgeFt(Number(e.target.value) || 0)} />
+              </>
+            )}
             <label>Roof overhang (ft)</label>
             <input type="number" step="0.1" min={0} value={overhangFt} onChange={e => setOverhangFt(Number(e.target.value) || 0)} />
           </>
@@ -333,6 +377,14 @@ export default function App() {
           ))}
         </select>
 
+        <label>
+          Detection method
+          <select value={detector} onChange={e => setDetector(e.target.value as 'opencv' | 'ml')}>
+            <option value="opencv">OpenCV (current)</option>
+            <option value="ml">ML model (includes railing)</option>
+          </select>
+        </label>
+
         <button onClick={generate} disabled={loading || previewing}>Generate 3D model</button>
         <div className="status">{status}</div>
 
@@ -341,6 +393,17 @@ export default function App() {
           <option value="off">Off</option>
           <option value="overall">Overall + doors/windows</option>
           <option value="all">All walls</option>
+        </select>
+        <label>Dimension units</label>
+        <select
+          value={dimensionUnit}
+          onChange={e => setDimensionUnit(e.target.value as DimensionUnit)}
+        >
+          <option value="ft-in">Feet &amp; inches (ft/in)</option>
+          <option value="m">Metres (m)</option>
+          <option value="cm">Centimetres (cm)</option>
+          <option value="mm">Millimetres (mm)</option>
+          <option value="in">Inches (in)</option>
         </select>
         <div className="legend">
           <span className="dot window" /> Window
@@ -376,6 +439,41 @@ export default function App() {
               value={Math.min(toFt(selectedThickness), 2)}
               onChange={e => setWallThickness(selectedWall.id, toM(parseFloat(e.target.value)))}
             />
+
+            {axis && (
+              <>
+                <label>Extend start (ft)</label>
+                <input
+                  type="number" step="0.1"
+                  value={Number(toFt(selExt.start).toFixed(2))}
+                  onChange={e => setEnd('start', toM(parseFloat(e.target.value)))}
+                />
+                <input
+                  type="range" min={Math.floor(toFt(-(axis.startLen - 0.1)))} max={30} step={0.05}
+                  value={toFt(selExt.start)}
+                  onChange={e => setEnd('start', toM(parseFloat(e.target.value)))}
+                />
+                <label>Extend end (ft)</label>
+                <input
+                  type="number" step="0.1"
+                  value={Number(toFt(selExt.end).toFixed(2))}
+                  onChange={e => setEnd('end', toM(parseFloat(e.target.value)))}
+                />
+                <input
+                  type="range" min={Math.floor(toFt(-(axis.endLen - 0.1)))} max={30} step={0.05}
+                  value={toFt(selExt.end)}
+                  onChange={e => setEnd('end', toM(parseFloat(e.target.value)))}
+                />
+                <label className="check">
+                  <input type="checkbox" checked={snapOn} onChange={e => setSnapOn(e.target.checked)} />
+                  Snap to nearby walls when dragging
+                </label>
+                {!axis.diagonal && (
+                  <button className="secondary" onClick={snapEnds}>Snap ends to nearest walls</button>
+                )}
+              </>
+            )}
+
             <button className="secondary" onClick={() => resetWall(selectedWall.id)}>
               Reset to default
             </button>
@@ -445,11 +543,15 @@ export default function App() {
             onSelect={handleSelect}
             groups={groups}
             dimMode={dimMode}
+            dimensionUnit={dimensionUnit}
             ground={ground}
-            roof={{ type: roofType, visible: roofOn, ridgeM: toM(ridgeFt), overhangM: toM(overhangFt) }}
+            roof={{ type: roofType as RoofType, visible: roofOn, ridgeM: toM(ridgeFt), overhangM: toM(overhangFt) }}
             stumpM={toM(stumpFt)}
             spec={{ sillM: toM(sillFt), headM: toM(topFt), doorM: toM(topFt) }}
             finish={{ wall: WALL_FINISHES[wallFinish], roof: ROOF_FINISHES[roofFinish], roofColor }}
+            extensions={extensions}
+            onExtend={setExtension}
+            snapOn={snapOn}
           />
         ) : (
           <p className="empty">Upload a plan to begin</p>

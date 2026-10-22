@@ -8,9 +8,32 @@ from pydantic import BaseModel
 from chat import ask
 
 from detect import analyse, overlay_b64
+from ml_detector import analyse_ml
+
+import hashlib
+from pdf_context import analyse_pdf
 
 app = FastAPI(title="Floor plan -> 3D (MVP)")
 PDF_DPI = 200
+
+_design_cache: dict = {}
+
+def design_of(data: bytes) -> dict | None:
+    """PDF roof/deck/levels, cached by file hash. None for images or on failure."""
+    if data[:4] != b"%PDF":
+        return None
+    key = hashlib.md5(data).hexdigest()
+    if key not in _design_cache:
+        try:
+            _design_cache[key] = analyse_pdf(data)
+        except Exception as e:           # never break plan detection because of this
+            _design_cache[key] = {"ok": False, "floorPlanPage": None, "warnings": [str(e)]}
+    return _design_cache[key]
+
+def plan_page(data: bytes) -> int:
+    d = design_of(data)
+    p = d.get("floorPlanPage") if d else None
+    return p if p is not None else 0
 
 
 def load_gray(data: bytes, filename: str):
@@ -18,7 +41,7 @@ def load_gray(data: bytes, filename: str):
     if filename.lower().endswith(".pdf") or data[:4] == b"%PDF":
         import fitz  # PyMuPDF
         doc = fitz.open(stream=data, filetype="pdf")
-        pix = doc[0].get_pixmap(dpi=PDF_DPI, colorspace=fitz.csGRAY)
+        pix = doc[plan_page(data)].get_pixmap(dpi=PDF_DPI, colorspace=fitz.csGRAY)
         return np.frombuffer(pix.samples, np.uint8).reshape(pix.height, pix.width).copy(), True
     img = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_GRAYSCALE)
     if img is None:
@@ -113,9 +136,11 @@ async def convert(
     whites: float = Form(0),
     blacks: float = Form(0),
     sharpness: float = Form(0),
-    invert: bool = Form(False),        # real overall width of the plan -> auto-calibrate
+    invert: bool = Form(False),  
+    detector: str = Form("opencv"),      # real overall width of the plan -> auto-calibrate
     ):
-    gray, is_pdf = load_gray(await file.read(), file.filename or "")
+    data = await file.read()
+    gray, is_pdf = load_gray(data, file.filename or "")
     gray = apply_crop(gray, crop)
 
     gray = apply_adjustments(
@@ -143,16 +168,35 @@ async def convert(
     else:
         ppm = 60.0  # arbitrary fallback; user should calibrate
 
-    model, ov = analyse(gray, ppm)
+    if detector.lower() == "ml":
+       model, ov = analyse_ml(gray, ppm)
+    elif detector.lower() == "opencv":
+       model, ov = analyse(gray, ppm)
+    else:
+       raise HTTPException(400, "detector must be 'opencv' or 'ml'")
     b = model["bounds"]
     width = b["x1"] - b["x0"]
     if known_width_m > 0 and width > 0:
         # re-run with the corrected scale so every metre-based threshold (min wall length,
         # door sizes, tolerances) is applied in real metres, not in the guessed scale
         ppm = ppm * width / known_width_m
-        model, ov = analyse(gray, ppm)
+        if detector.lower() == "ml":
+            model, ov = analyse_ml(gray, ppm)
+        else:
+            model, ov = analyse(gray, ppm)
 
-    model["overlay"] = overlay_b64(ov)
+    if detector.lower() == "ml":
+       import base64
+       ok, buf = cv2.imencode(".png", ov)
+       if not ok:
+           raise HTTPException(500, "Could not encode ML overlay")
+       model["overlay"] = "data:image/png;base64," + base64.b64encode(buf.tobytes()).decode("ascii")
+    else:
+       model["overlay"] = overlay_b64(ov)
+    d = design_of(data)
+    if d and d.get("ok"):
+        model["design"] = d
+    return model
     return model
 
 
@@ -164,7 +208,7 @@ async def preview(file: UploadFile = File(...)):
     if name.lower().endswith(".pdf") or data[:4] == b"%PDF":
         import fitz
         doc = fitz.open(stream=data, filetype="pdf")
-        page = doc[0]
+        page = doc[plan_page(data)]
         long_pt = max(page.rect.width, page.rect.height)
         dpi = min(150, 1800 * 72 / long_pt)          # keep the preview around 1800 px
         pix = page.get_pixmap(dpi=dpi)

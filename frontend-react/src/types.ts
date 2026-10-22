@@ -1,9 +1,18 @@
 export interface Wall {
   id: number
-  x0: number; y0: number; x1: number; y1: number
+  x0: number
+  y0: number
+  x1: number
+  y1: number
   horizontal: boolean
   length: number
   thickness: number
+  // diagonal walls (ML detector only)
+  diagonal?: boolean
+  ax?: number
+  ay?: number
+  bx?: number
+  by?: number
 }
 
 export interface Opening {
@@ -16,6 +25,7 @@ export interface Opening {
   thickness: number
   width: number
   ink_density: number
+  
 }
 
 export interface PlanModel {
@@ -25,6 +35,32 @@ export interface PlanModel {
   walls: Wall[]
   openings: Opening[]
   overlay: string
+  railings?: Railing[]
+  stairs?: Stair[]
+  design?: import('./Viewer').DesignInfo
+}
+
+export interface Railing {
+  id: number
+  x0: number
+  y0: number
+  x1: number
+  y1: number
+  horizontal: boolean
+  length: number
+  thickness: number
+}
+
+export interface Stair {
+  id: number
+  x0: number
+  y0: number
+  x1: number
+  y1: number
+  horizontal: boolean
+  length: number
+  width: number
+  steps: number
 }
 
 export type DimMode = 'off' | 'overall' | 'all'
