@@ -11,6 +11,9 @@ import {
   previewPlan,
   DEFAULT_ADJUSTMENTS,
   type ImageAdjustments,
+  type PreviewResult,
+  type PageThumb,
+
 } from './api'
 import CropDialog, { type CropBox } from './CropDialog'
 import ChatPanel from './ChatPanel'
@@ -22,6 +25,7 @@ import SiteMap from './SiteMap'
 import type { SiteConfig } from './site'
 import FloorMarker from './FloorMarker'
 import type { ExtraSel } from './Viewer'
+import PagePicker from './PagePicker' 
 
 type DimensionUnit = 'ft-in' | 'm' | 'cm' | 'mm' | 'in'
 
@@ -44,7 +48,10 @@ export default function App() {
   const [thicknesses, setThicknesses] = useState<Record<number, number>>({})
   const [selectedIds, setSelectedIds] = useState<number[]>([])
   const [hist, setHist] = useState<DeleteHistory>(EMPTY_HIST)
-  const [preview, setPreview] = useState<{ image: string } | null>(null)
+  const [preview, setPreview] = useState<PreviewResult | null>(null)
+  const [pages, setPages] = useState<PageThumb[]>([])
+  const [pageNo, setPageNo] = useState(-1)
+  const [pickerOpen, setPickerOpen] = useState(false)
   const [crop, setCrop] = useState<CropBox | null>(null)
   const [cropOpen, setCropOpen] = useState(false)
   const [previewing, setPreviewing] = useState(false)
@@ -118,11 +125,15 @@ export default function App() {
   })
 
 
+    const applySuggestion = (p: PreviewResult) => {
+    const sg = p.suggest
+    if (!sg || sg.page !== p.page) return
+    if (sg.crop) setCrop(sg.crop as CropBox)
+    if (sg.scale && sg.scale > 0) setScale(Math.round(sg.scale * 10) / 10)
+  }
+
   const onFileChosen = async (f: File | null) => {
-    setFile(f)
-    setPreview(null)
-    setCrop(null)
-    setDocText('')
+    setFile(f); setPreview(null); setCrop(null); setDocText(''); setPages([]); setPageNo(-1)
     if (!f) return
     setPreviewing(true)
     setStatus('Loading preview…')
@@ -130,13 +141,46 @@ export default function App() {
       const p = await previewPlan(f)
       setPreview(p)
       setDocText(p.text ?? '')
+      setPageNo(p.page ?? -1)
+      if ((p.pageList?.length ?? 0) > 1) {
+        setPages(p.pageList!)
+        setPickerOpen(true)
+        setStatus('Choose the page with the floor plan.')
+      } else {
+        applySuggestion(p)
+        setCropOpen(true)
+        setStatus('Select the floor plan area.')
+      }
+    } catch (e) {
+      setStatus('Error: ' + (e as Error).message)
+    }
+    setPreviewing(false)
+  }
+
+  const choosePage = async (n: number) => {
+    setPickerOpen(false)
+    if (!file) return
+    if (preview && n === preview.page) {
+      applySuggestion(preview)
+      setCropOpen(true)
+      setStatus('Select the floor plan area.')
+      return
+    }
+    setPreviewing(true)
+    setStatus('Loading page…')
+    try {
+      const p = await previewPlan(file, n)
+      setPreview(p)
+      setPageNo(n)
+      setCrop(null)
+      applySuggestion(p)
       setCropOpen(true)
       setStatus('Select the floor plan area.')
     } catch (e) {
       setStatus('Error: ' + (e as Error).message)
     }
     setPreviewing(false)
-}
+  }
   
 
   const generate = async () => {
@@ -151,6 +195,7 @@ export default function App() {
         pxPerM: (parseFloat(ppm) || 0) / FT,
         crop,
         adjustments,
+        page: pageNo,
       })
       setModel(m)
       setFloorOrder(m.floors?.map(f => f.id) ?? [])
@@ -424,6 +469,9 @@ export default function App() {
           <div className="crop-summary">
             <span>{crop ? 'Plan area selected' : 'Using full page'}</span>
             <button className="link" onClick={() => setCropOpen(true)}>Change area</button>
+            {pages.length > 1 && (
+              <button className="link" onClick={() => setPickerOpen(true)}>Change page</button>
+            )}
           </div>
         )}
 
@@ -794,6 +842,16 @@ export default function App() {
             setFloorsOpen(false)
           }}
           onClose={() => setFloorsOpen(false)} />
+      )}
+
+      {pickerOpen && pages.length > 1 && (
+        <PagePicker
+          pages={pages}
+          current={preview?.page ?? 0}
+          suggested={preview?.suggest?.page ?? null}
+          onChoose={choosePage}
+          onCancel={() => setPickerOpen(false)}
+        />
       )}
 
       {cropOpen && preview && (

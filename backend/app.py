@@ -37,12 +37,17 @@ def plan_page(data: bytes) -> int:
     return p if p is not None else 0
 
 
-def load_gray(data: bytes, filename: str):
+def pick_page(data: bytes, page: int, n: int) -> int:
+    """The page the user chose, or the automatically found floor-plan page."""
+    return page if 0 <= page < n else min(plan_page(data), n - 1)
+
+
+def load_gray(data: bytes, filename: str, page: int = -1):
     """Returns (gray image, is_pdf)."""
     if filename.lower().endswith(".pdf") or data[:4] == b"%PDF":
         import fitz  # PyMuPDF
         doc = fitz.open(stream=data, filetype="pdf")
-        pix = doc[plan_page(data)].get_pixmap(dpi=PDF_DPI, colorspace=fitz.csGRAY)
+        pix = doc[pick_page(data, page, len(doc))].get_pixmap(dpi=PDF_DPI, colorspace=fitz.csGRAY)
         return np.frombuffer(pix.samples, np.uint8).reshape(pix.height, pix.width).copy(), True
     img = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_GRAYSCALE)
     if img is None:
@@ -139,9 +144,10 @@ async def convert(
     sharpness: float = Form(0),
     invert: bool = Form(False),  
     detector: str = Form("opencv"),      # real overall width of the plan -> auto-calibrate
+    page: int = Form(-1),                # PDF page chosen by the user; -1 = found automatically
     ):
     data = await file.read()
-    gray, is_pdf = load_gray(data, file.filename or "")
+    gray, is_pdf = load_gray(data, file.filename or "", page)
     gray = apply_crop(gray, crop)
 
     gray = apply_adjustments(
@@ -216,21 +222,49 @@ async def convert(
     return model
 
 
+def _page_list(doc, data: bytes):
+    """Small thumbnails of every page with the kind found by pdf_context (site, plan, elevation...)."""
+    import fitz
+    d = design_of(data) or {}
+    info = {p["index"]: p for p in d.get("pageInfo", [])}
+    out = []
+    for i in range(min(len(doc), 16)):
+        pg = doc[i]
+        z = 300 / max(pg.rect.width, pg.rect.height)
+        pix = pg.get_pixmap(matrix=fitz.Matrix(z, z), alpha=False)
+        out.append({
+            "index": i,
+            "thumb": "data:image/jpeg;base64," + base64.b64encode(pix.tobytes("jpeg")).decode(),
+            "kind": info.get(i, {}).get("kind", "other"),
+            "label": info.get(i, {}).get("label", f"Page {i + 1}"),
+        })
+    return out
+
+
 @app.post("/api/preview")
-async def preview(file: UploadFile = File(...)):
-    """Returns a downscaled picture of the first page so the user can choose the plan area."""
+async def preview(file: UploadFile = File(...), page: int = Form(-1)):
+    """A downscaled picture of one page so the user can choose the plan area.
+    page = -1: the floor-plan page found automatically, plus thumbnails of all pages (multipage PDFs)."""
     data = await file.read()
     name = file.filename or ""
+    page_list, used, suggest = [], 0, None
     if name.lower().endswith(".pdf") or data[:4] == b"%PDF":
         import fitz
         doc = fitz.open(stream=data, filetype="pdf")
-        page = doc[plan_page(data)]
-        long_pt = max(page.rect.width, page.rect.height)
-        dpi = min(150, 1800 * 72 / long_pt)          # keep the preview around 1800 px
-        pix = page.get_pixmap(dpi=dpi)
+        used = pick_page(data, page, len(doc))
+        pg = doc[used]
+        long_pt = max(pg.rect.width, pg.rect.height)
+        dpi = int(min(150, 1800 * 72 / long_pt))      # int: PyMuPDF rejects a float dpi
+        pix = pg.get_pixmap(dpi=dpi)
         png = pix.tobytes("png")
         w, h, pages = pix.width, pix.height, len(doc)
-        text = "\n".join(p.get_text("text") for p in doc).strip()[:100_000]   # <- new
+        text = "\n".join(p.get_text("text") for p in doc).strip()[:100_000]
+        if pages > 1 and page < 0:
+            page_list = _page_list(doc, data)
+        d = design_of(data) or {}
+        s = d.get("suggest")
+        if s and s.get("page") == used:
+            suggest = s
     else:
         img = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
         if img is None:
@@ -242,11 +276,12 @@ async def preview(file: UploadFile = File(...)):
             h, w = img.shape[:2]
         png = cv2.imencode(".png", img)[1].tobytes()
         pages = 1
-        text = ""                                                              # <- new
+        text = ""
     return {
         "image": "data:image/png;base64," + base64.b64encode(png).decode(),
-        "width": w, "height": h, "pages": pages,
-        "text": text,                                                          # <- new
+        "width": w, "height": h, "pages": pages, "page": used,
+        "pageList": page_list, "suggest": suggest,
+        "text": text,
     }
 
 class ChatMessage(BaseModel):

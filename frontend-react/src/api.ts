@@ -28,6 +28,7 @@ export interface ConvertOptions {
   drawingScale: number
   knownWidthM: number
   pxPerM: number
+  page?: number
   crop?: [number, number, number, number] | null
   adjustments?: ImageAdjustments
   detector?: 'opencv' | 'ml'
@@ -40,6 +41,7 @@ export async function convertPlan(file: File, o: ConvertOptions): Promise<PlanMo
   fd.append('drawing_scale', String(o.drawingScale || 100))
   fd.append('known_width_m', String(o.knownWidthM || 0))
   fd.append('px_per_m', String(o.pxPerM || 0))
+  fd.append('page', String(o.page ?? -1))
   if (o.crop) fd.append('crop', o.crop.join(','))
   if (o.adjustments) {
     Object.entries(o.adjustments).forEach(([key, value]) => {
@@ -68,7 +70,13 @@ export async function convertPlan(file: File, o: ConvertOptions): Promise<PlanMo
   return res.json()
 }
 
-export interface PreviewResult { image: string; width: number; height: number; pages: number; text: string}
+export interface PageThumb { index: number; thumb: string; kind: string; label: string }
+export interface PreviewResult {
+  image: string; width: number; height: number; pages: number; text: string
+  page: number
+  pageList?: PageThumb[]
+  suggest?: { page: number; scale: number | null; crop: [number, number, number, number] | null } | null
+}
 
 export interface ChatMessage { role: 'user' | 'assistant'; content: string; error?: boolean }
 
@@ -89,9 +97,10 @@ export async function chatWithDocument(documentText: string, messages: ChatMessa
   return data.reply as string
 }
 
-export async function previewPlan(file: File): Promise<PreviewResult> {
+export async function previewPlan(file: File, page = -1): Promise<PreviewResult> {
   const fd = new FormData()
   fd.append('file', file)
+  fd.append('page', String(page))
   const res = await fetch('/api/preview', { method: 'POST', body: fd })
   if (!res.ok) {
     const err = await res.json().catch(() => ({}))
