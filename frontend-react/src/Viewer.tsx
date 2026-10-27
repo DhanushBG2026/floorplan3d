@@ -13,6 +13,7 @@ type DimensionUnit = 'ft-in' | 'm' | 'cm' | 'mm' | 'in'
 import { roofTriangles, planarUVs, type RoofType } from './roof'
 import { WALL_FINISHES, ROOF_FINISHES, DEFAULT_ROOF_COLOR, type Finish } from './materials'
 import { applyExtensions, groupAxis, snapCoordinate, clampExt, type Ext, type AxisInfo } from './extend'
+import { buildSiteTexture, toLocal, type SiteConfig } from './site'
 
 export interface RoofConfig { type: RoofType; visible: boolean; ridgeM: number; overhangM: number }
 export interface OpeningSpec { sillM: number; headM: number; doorM: number }
@@ -30,6 +31,8 @@ type V3 = [number, number, number]
 
 // ---------- Box (walls, floor, window parts) ----------
 // Plan coords: x right, y down (m) -> three: x right, z = plan y, y up
+type Zone = 'ext' | 'int'
+
 interface BoxProps {
   x0: number; z0: number; x1: number; z1: number
   y0: number; y1: number
@@ -38,11 +41,16 @@ interface BoxProps {
   shrink?: number
   edges?: boolean
   glossy?: boolean
+  zone?: Zone
   selected?: boolean
   onClick?: (e: ThreeEvent<MouseEvent>) => void
 }
 
-export interface FinishConfig { wall: Finish; roof: Finish; roofColor: string }
+export interface FinishConfig {
+  wall: Finish; roof: Finish; roofColor: string
+  exteriorColor?: string   // colour picker values; empty = the finish's own colour
+  interiorColor?: string
+}
 
 const FinishContext = createContext<FinishConfig>({
   wall: WALL_FINISHES.plain,
@@ -133,9 +141,10 @@ function scaledBoxGeometry(w: number, h: number, d: number, tile: number) {
 }
 
 function Box({
-  x0, z0, x1, z1, y0, y1, color, opacity = 1, shrink = 0, edges, glossy, selected, onClick,
+  x0, z0, x1, z1, y0, y1, color, opacity = 1, shrink = 0, edges, glossy, zone, selected, onClick,
 }: BoxProps) {
-  const { wall } = useContext(FinishContext)
+  const { wall, exteriorColor, interiorColor } = useContext(FinishContext)
+  const tint = (zone === 'ext' ? exteriorColor : zone === 'int' ? interiorColor : '') || undefined
   const w = x1 - x0
   const d = z1 - z0
   const h = y1 - y0 - shrink
@@ -156,7 +165,7 @@ function Box({
     >
       <primitive object={geometry} attach="geometry" />
       {glossy ? (
-        <Surface finish={wall} selected={selected} />
+        <Surface finish={wall} tint={tint} selected={selected} />
       ) : (
         <meshStandardMaterial color={color} transparent={opacity < 1} opacity={opacity} />
       )}
@@ -208,6 +217,7 @@ function DoorParts({ o, h, doorH }: { o: Opening; h: number; doorH: number }) {
 
 interface OpeningMeshProps {
   o: Opening
+  zone?: Zone
   H: number
   spec: OpeningSpec
   selected?: boolean
@@ -252,32 +262,48 @@ function RailingMesh({ r, height = 1.0 }: { r: Railing; height?: number }) {
 }
 
 // ---------- NEW: Staircase renderer ----------
-function StairsMesh({ stair, height = 1.2 }: { stair: Stair; height?: number }) {
-  const count = Math.max(3, Math.min(16, stair.steps || 8))
-  const run = stair.length / count
+function StairsMesh({ stair, rise, walls, flip, onFlip }: {
+  stair: Stair; rise: number; walls: Wall[]; flip: boolean; onFlip: () => void
+}) {
+  const alongX = stair.x1 - stair.x0 >= stair.y1 - stair.y0 // the steps run along the longer side
+  const lo = alongX ? stair.x0 : stair.y0
+  const hi = alongX ? stair.x1 : stair.y1
+  const c0 = alongX ? stair.y0 : stair.x0 // the two sides of the flight
+  const c1 = alongX ? stair.y1 : stair.x1
+
+  // The plan shows only a rectangle, so guess the climbing direction: the top of a flight usually
+  // ends against a wall. A direction supplied by the backend (stair.dir = 1 or -1) wins.
+  const dir = useMemo(() => {
+    const given = (stair as { dir?: number }).dir
+    if (given === 1 || given === -1) return given
+    const reach = 0.4
+    const touch = (a0: number, a1: number) => walls.reduce((sum, w) => {
+      if (w.diagonal || w.arc) return sum
+      const [wa0, wa1, wc0, wc1] = alongX ? [w.x0, w.x1, w.y0, w.y1] : [w.y0, w.y1, w.x0, w.x1]
+      const along = Math.min(a1, wa1) - Math.max(a0, wa0)
+      const across = Math.min(c1, wc1) - Math.max(c0, wc0)
+      return along > 0 && across > 0 ? sum + along * across : sum
+    }, 0)
+    return touch(hi, hi + reach) >= touch(lo - reach, lo) ? 1 : -1 // 1 = climbs toward the high end
+  }, [walls, alongX, lo, hi, c0, c1, stair])
+  const up = flip ? -dir : dir
+
+  const count = Math.max(3, Math.min(30, Math.round(rise / 0.18)))
+  const tread = (hi - lo) / count
 
   return (
     <group>
       {Array.from({ length: count }, (_, i) => {
-        const stepHeight = height * (i + 1) / count
-
-        // For horizontal stairs, each step advances along X.
-        // For vertical stairs, each step advances along the plan's Y/Z axis.
-        const x0 = stair.horizontal ? stair.x0 + i * run : stair.x0
-        const x1 = stair.horizontal ? stair.x0 + (i + 1) * run : stair.x1
-        const z0 = stair.horizontal ? stair.y0 : stair.y0 + i * run
-        const z1 = stair.horizontal ? stair.y1 : stair.y0 + (i + 1) * run
-
+        const a0 = up === 1 ? lo + i * tread : hi - (i + 1) * tread
+        const a1 = a0 + tread
         return (
           <Box
             key={`stair-${stair.id}-${i}`}
-            x0={x0}
-            x1={x1}
-            z0={z0}
-            z1={z1}
-            y0={0}
-            y1={stepHeight}
+            x0={alongX ? a0 : c0} x1={alongX ? a1 : c1}
+            z0={alongX ? c0 : a0} z1={alongX ? c1 : a1}
+            y0={0} y1={(rise * (i + 1)) / count}
             color="#b8b1a5"
+            onClick={e => { e.stopPropagation(); onFlip() }}
           />
         )
       })}
@@ -285,7 +311,45 @@ function StairsMesh({ stair, height = 1.2 }: { stair: Stair; height?: number }) 
   )
 }
 
-function OpeningMesh({ o, H, spec, selected, onPick }: OpeningMeshProps) {
+function CurvedWall({ w, H, t, spec, selected, onPick }: {
+  w: Wall; H: number; t: number; spec: OpeningSpec; selected: boolean
+  onPick: (e: ThreeEvent<MouseEvent>) => void
+}) {
+  const arc = w.arc as NonNullable<Wall['arc']>
+  const span = arc.a1 - arc.a0
+  const n = Math.max(4, Math.ceil(Math.abs(span) / (Math.PI / 18))) // a piece every 10 degrees
+  const sill = Math.min(spec.sillM, H)
+  const head = Math.min(spec.headM, H)
+
+  return (
+    <>
+      {Array.from({ length: n }, (_, i) => {
+        const t0 = arc.a0 + (span * i) / n
+        const t1 = arc.a0 + (span * (i + 1)) / n
+        const px0 = arc.cx + arc.r * Math.cos(t0), pz0 = arc.cy + arc.r * Math.sin(t0)
+        const px1 = arc.cx + arc.r * Math.cos(t1), pz1 = arc.cy + arc.r * Math.sin(t1)
+        const len = Math.hypot(px1 - px0, pz1 - pz0) + 0.02
+        const common = { x0: -len / 2, x1: len / 2, z0: -t / 2, z1: t / 2, selected, onClick: onPick, zone: 'ext' as Zone }
+        return (
+          <group key={`${w.id}-arc-${i}`} position={[(px0 + px1) / 2, 0, (pz0 + pz1) / 2]}
+                 rotation-y={-Math.atan2(pz1 - pz0, px1 - px0)}>
+            {w.bay ? (
+              <>
+                <Box {...common} y0={0} y1={sill} color={WALL} glossy />
+                <Box x0={-len / 2} x1={len / 2} z0={-t / 4} z1={t / 4} y0={sill} y1={head} color="#9ad1ff" opacity={0.35} />
+                <Box {...common} y0={head} y1={H} color={WALL} glossy />
+              </>
+            ) : (
+              <Box {...common} y0={0} y1={H} color={WALL} glossy />
+            )}
+          </group>
+        )
+      })}
+    </>
+  )
+}
+
+function OpeningMesh({ o, H, spec, selected, onPick, zone }: OpeningMeshProps) {
   const t = o.thickness
 
   const r = (y0: number, y1: number, color: string, opacity = 1) => {
@@ -293,6 +357,7 @@ function OpeningMesh({ o, H, spec, selected, onPick }: OpeningMeshProps) {
     const common = {
       y0, y1, color, opacity,
       glossy: isWall,
+      zone: isWall ? zone : undefined,
       selected: !!selected && isWall,
       onClick: isWall ? onPick : undefined,
     }
@@ -399,7 +464,7 @@ function Dimensions({
 
       {/* Individual wall dimensions */}
       {mode === 'all' &&
-        model.walls.filter(w => w.length >= 1.5 && !w.diagonal).map(w => {
+        model.walls.filter(w => w.length >= 1.5 && !w.diagonal && !w.arc).map(w => {
           const hz = w.horizontal
           const mid = hz ? (w.y0 + w.y1) / 2 : (w.x0 + w.x1) / 2
           const outward = hz ? (mid < cz ? -1 : 1) : (mid < cx ? -1 : 1)
@@ -446,6 +511,96 @@ function Ground({ type, cx, cz, size }: { type: GroundType; cx: number; cz: numb
   )
 }
 
+// Drop-in for Viewer.tsx: the map under the model, plus the plot boundary line.
+// Needs these imports at the top of Viewer.tsx:
+//   import { Line } from '@react-three/drei'            (add Line to your existing drei import)
+//   import { buildSiteTexture, toLocal, type SiteConfig } from './site'
+function SiteGround({ site, cx, cz }: { site: SiteConfig; cx: number; cz: number }) {
+  const [img, setImg] = useState<{ texture: THREE.CanvasTexture; extent: number } | null>(null)
+  useEffect(() => {
+    let dead = false
+    setImg(null)
+    buildSiteTexture(site).then(r => { if (!dead) setImg(r) })
+    return () => { dead = true }
+  }, [site.lat, site.lng, site.layer, site.zoom]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const outline = useMemo(() => {
+    if (site.boundary.length < 2) return null
+    const pts = site.boundary.map(([la, ln]) => {
+      const [e, s] = toLocal(site.lat, site.lng, la, ln)
+      return new THREE.Vector3(e, 0.08, s)
+    })
+    if (pts.length > 2) pts.push(pts[0].clone())
+    return pts
+  }, [site])
+
+  // the ground is turned, not the house, so every wall keeps its place in the plan
+  // Layers are separated by draw order and depth offsets, not by tiny height differences, so the
+  // depth buffer cannot flicker between them when the camera moves or zooms.
+  return (
+    <group position={[cx, -0.11, cz]} rotation={[0, (site.rotationDeg * Math.PI) / 180, 0]}>
+      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.3, 0]} renderOrder={0}>
+        <planeGeometry args={[8000, 8000]} />
+        <meshBasicMaterial color="#6f7d57" polygonOffset polygonOffsetFactor={4} polygonOffsetUnits={4} />
+      </mesh>
+      {img && (
+        <>
+          <mesh rotation={[-Math.PI / 2, 0, 0]} renderOrder={1}>
+            <planeGeometry args={[img.extent, img.extent]} />
+            <meshBasicMaterial map={img.texture} toneMapped={false} polygonOffset polygonOffsetFactor={2} polygonOffsetUnits={2} />
+          </mesh>
+          <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0.02, 0]} receiveShadow renderOrder={2}>
+            <planeGeometry args={[img.extent, img.extent]} />
+            <shadowMaterial opacity={0.35} transparent depthWrite={false} polygonOffset polygonOffsetFactor={-2} polygonOffsetUnits={-2} />
+          </mesh>
+        </>
+      )}
+      {outline && <Line points={outline} color="#ffd400" lineWidth={3} renderOrder={3} />}
+    </group>
+  )
+}
+
+// Frames the camera on the building. The Canvas itself is never re-created (re-creating it when
+// stacking is switched on or off could leave the WebGL view blank); the camera is moved instead.
+function CameraRig({ cx, cz, size, totalH, frameKey }: { cx: number; cz: number; size: number; totalH: number; frameKey: string }) {
+  const camera = useThree(s => s.camera)
+  const first = useRef(true)
+  useEffect(() => {
+    if (first.current) { first.current = false; return }
+    camera.position.set(cx + size * 0.8, size * 0.9 + totalH * 0.6, cz + size * 1.1)
+    camera.updateProjectionMatrix()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [frameKey])
+  return null
+}
+
+// ---------- Items added in the plan editor: click to select, highlighted by a blue box ----------
+export type ExtraKind = 'wall' | 'opening' | 'railing' | 'deck'
+export interface ExtraSel { kind: ExtraKind; id: number }
+
+function Pickable({ on, children }: { on: (e: ThreeEvent<MouseEvent>) => void; children: ReactNode }) {
+  return (
+    <group
+      onClick={e => { e.stopPropagation(); on(e) }}
+      onPointerOver={e => { e.stopPropagation(); document.body.style.cursor = 'pointer' }}
+      onPointerOut={() => { document.body.style.cursor = 'auto' }}
+    >
+      {children}
+    </group>
+  )
+}
+
+// translucent box round a selected item (invisible but clickable while not selected, to make thin items easy to hit)
+function SelBox({ x0, z0, x1, z1, y0, y1, show = true, pad = 0.04 }: Box2 & { y0: number; y1: number; show?: boolean; pad?: number }) {
+  const w = x1 - x0 + 2 * pad, d = z1 - z0 + 2 * pad, h = y1 - y0 + 2 * pad
+  return (
+    <mesh position={[(x0 + x1) / 2, (y0 + y1) / 2, (z0 + z1) / 2]}>
+      <boxGeometry args={[w, h, d]} />
+      <meshBasicMaterial color="#3b82f6" transparent opacity={show ? 0.3 : 0} depthWrite={false} />
+    </mesh>
+  )
+}
+
 // ---------- Lights ----------
 function Lights({ cx, cz, size }: { cx: number; cz: number; size: number }) {
   const ref = useRef<THREE.DirectionalLight>(null)
@@ -478,7 +633,7 @@ function Lights({ cx, cz, size }: { cx: number; cz: number; size: number }) {
 }
 
 function Roof({ cfg, box, eaveY }: { cfg: RoofConfig; box: Box2; eaveY: number }) {
-  const { wall, roof: roofFinish, roofColor } = useContext(FinishContext)
+  const { wall, roof: roofFinish, roofColor, exteriorColor } = useContext(FinishContext)
 
   const geo = useMemo(() => {
     if (cfg.type === 'none') return null
@@ -510,7 +665,7 @@ function Roof({ cfg, box, eaveY }: { cfg: RoofConfig; box: Box2; eaveY: number }
       </mesh>
       {geo.gables && (
         <mesh geometry={geo.gables} castShadow receiveShadow>
-          <Surface finish={wall} side={THREE.DoubleSide} />
+          <Surface finish={wall} tint={exteriorColor || undefined} side={THREE.DoubleSide} />
         </mesh>
       )}
     </>
@@ -554,7 +709,7 @@ const NO_EXT: Record<number, Ext> = {}
 
 // Two draggable dots at the ends of the selected wall. Dragging moves that end along the wall.
 function ExtendHandles({
-  gid, axis, ext, wallH, stumpM, snapOn, walls, skip, onChange,
+  gid, axis, ext, wallH, stumpM, snapOn, walls, skip, onChange, origin = [0, 0, 0],
 }: {
   gid: number
   axis: AxisInfo
@@ -565,6 +720,7 @@ function ExtendHandles({
   walls: Wall[]
   skip: number[]
   onChange: (gid: number, e: Ext) => void
+  origin?: V3          // where this floor sits in the world (x, height, z)
 }) {
   const { camera, gl, raycaster, controls } = useThree()
   const [drag, setDrag] = useState<'start' | 'end' | null>(null)
@@ -578,7 +734,7 @@ function ExtendHandles({
     const ctl = controls as unknown as { enabled: boolean } | null
     if (ctl) ctl.enabled = false // no camera orbit while dragging a handle
 
-    const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -(stumpM + y))
+    const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -(stumpM + origin[1] + y))
     const hit = new THREE.Vector3()
     const ndc = new THREE.Vector2()
 
@@ -587,6 +743,8 @@ function ExtendHandles({
       ndc.set(((ev.clientX - r.left) / r.width) * 2 - 1, -((ev.clientY - r.top) / r.height) * 2 + 1)
       raycaster.setFromCamera(ndc, camera)
       if (!raycaster.ray.intersectPlane(plane, hit)) return
+      hit.x -= origin[0]
+      hit.z -= origin[2]
 
       const { ext: cur, walls: ws, skip: sk, snapOn: sn, axis: ax, onChange: change } = latest.current
       let next: Ext
@@ -623,7 +781,7 @@ function ExtendHandles({
       window.removeEventListener('pointerup', up)
       if (ctl) ctl.enabled = true
     }
-  }, [drag, gid, stumpM, y, camera, gl, raycaster, controls])
+  }, [drag, gid, stumpM, y, camera, gl, raycaster, controls, origin[0], origin[1], origin[2]])
 
   const point = (which: 'start' | 'end'): V3 => {
     if (axis.diagonal) {
@@ -698,8 +856,12 @@ function wallLengthSegments(w: Wall, openings: Opening[]) {
 // `model.design` is produced by the backend (pdf_context.py) when a PDF with elevations is uploaded.
 export interface DesignInfo {
   levels?: { ffl?: number; doorTop?: number; ceiling?: number; wallTop?: number; ridge?: number }
-  roof?: { type: string; riseM: number; ridgeLengthM: number | null; verandah: boolean } | null
-  deck?: { side: 'top' | 'bottom' | 'left' | 'right'; dimsMm: [number, number]; roofed: boolean } | null
+  roof?: { type: string; riseM: number; ridgeLengthM: number | null; overhangM?: number | null; verandah: boolean } | null
+  deck?: {
+    side: 'top' | 'bottom' | 'left' | 'right'; dimsMm: [number, number]; roofed: boolean
+    entries?: { side: 'top' | 'bottom' | 'left' | 'right'; t: number; widthM: number }[]
+  } | null
+  stumpM?: number | null
 }
 
 type P3 = [number, number, number]
@@ -731,6 +893,7 @@ function triGeometry(a: P3, b: P3, c: P3, tile: number) {
   return g
 }
 
+export interface UserDeck { id: number; x0: number; y0: number; x1: number; y1: number; side: 'top' | 'bottom' | 'left' | 'right'; roofed?: boolean }
 interface DeckRect extends Box2 { side: 'top' | 'bottom' | 'left' | 'right'; along: number; depth: number }
 
 // Gable roof from the PDF: ridge along `axis`, rise above the wall top, overhang all round,
@@ -738,7 +901,7 @@ interface DeckRect extends Box2 { side: 'top' | 'bottom' | 'left' | 'right'; alo
 function DesignRoof({ box, eaveY, riseM, axis, overhang }: {
   box: Box2; eaveY: number; riseM: number; axis: 'x' | 'z'; overhang: number
 }) {
-  const { wall, roof: roofFinish, roofColor } = useContext(FinishContext)
+  const { wall, roof: roofFinish, roofColor, exteriorColor } = useContext(FinishContext)
   const geo = useMemo(() => {
     const u0 = axis === 'x' ? box.x0 : box.z0, u1 = axis === 'x' ? box.x1 : box.z1   // along the ridge
     const v0 = axis === 'x' ? box.z0 : box.x0, v1 = axis === 'x' ? box.z1 : box.x1   // across it
@@ -769,7 +932,7 @@ function DesignRoof({ box, eaveY, riseM, axis, overhang }: {
       ))}
       {[geo.g0, geo.g1].map((g, i) => (
         <mesh key={`g${i}`} geometry={g} castShadow receiveShadow>
-          <Surface finish={wall} side={THREE.DoubleSide} />
+          <Surface finish={wall} tint={exteriorColor || undefined} side={THREE.DoubleSide} />
         </mesh>
       ))}
     </>
@@ -798,8 +961,11 @@ function boardTexture(vertical: boolean, w: number, d: number) {
 }
 
 // Deck platform with board lines, balustrade (gaps where stairs meet it), posts and verandah roof.
-function Deck({ rect, stairs, eaveY, roofed }: {
+type DeckEntry = { side: 'top' | 'bottom' | 'left' | 'right'; t: number; widthM: number }
+
+function Deck({ rect, stairs, eaveY, roofed, entries, stumpM }: {
   rect: DeckRect; stairs: Stair[]; eaveY: number; roofed: boolean
+  entries?: DeckEntry[]; stumpM: number
 }) {
   const { roof: roofFinish, roofColor } = useContext(FinishContext)
   const w = rect.x1 - rect.x0
@@ -823,13 +989,38 @@ function Deck({ rect, stairs, eaveY, roofed }: {
     return !(ax === x1 && bx === x1)
   })
 
+  // entry steps read from the plan ("ENTRY" labels beside the deck): a flight from the deck edge
+  // down to the ground. The balustrade is left open there.
+  const nSteps = stumpM >= 0.15 ? Math.max(2, Math.round(stumpM / 0.18)) : 0
+  const tread = 0.28
+  const facing = { bottom: 'top', top: 'bottom', left: 'right', right: 'left' }[rect.side]
+  const entryRects = (entries ?? []).filter(e => e.side !== facing).map(e => {
+    const run = Math.max(0.5, nSteps * tread)
+    const half = Math.max(0.4, Math.min(1.2, e.widthM)) / 2
+    const fit = (v: number, lo: number, hi: number) => Math.min(Math.max(v, lo + half), hi - half)
+    if (e.side === 'bottom' || e.side === 'top') {
+      const cx = fit(x0 + e.t * (x1 - x0), x0, x1)
+      return e.side === 'bottom'
+        ? { x0: cx - half, x1: cx + half, z0: z1, z1: z1 + run, dir: 'z+' as const }
+        : { x0: cx - half, x1: cx + half, z0: z0 - run, z1: z0, dir: 'z-' as const }
+    }
+    const cz = fit(z0 + e.t * (z1 - z0), z0, z1)
+    return e.side === 'right'
+      ? { x0: x1, x1: x1 + run, z0: cz - half, z1: cz + half, dir: 'x+' as const }
+      : { x0: x0 - run, x1: x0, z0: cz - half, z1: cz + half, dir: 'x-' as const }
+  })
+  const cutters: { x0: number; y0: number; x1: number; y1: number }[] = [
+    ...stairs,
+    ...entryRects.map(r => ({ x0: r.x0, y0: r.z0, x1: r.x1, y1: r.z1 })),
+  ]
+
   // pieces of each edge that are not interrupted by a staircase
   const pieces: { a: [number, number]; b: [number, number] }[] = []
   for (const [ax, az, bx, bz] of outer) {
     const horiz = az === bz
     const lo = horiz ? ax : az, hi = horiz ? bx : bz, fix = horiz ? az : ax
     const cuts: [number, number][] = []
-    for (const s of stairs) {
+    for (const s of cutters) {
       const sLo = horiz ? s.x0 : s.y0, sHi = horiz ? s.x1 : s.y1
       const nLo = horiz ? s.y0 : s.x0, nHi = horiz ? s.y1 : s.x1
       if (fix >= nLo - 0.4 && fix <= nHi + 0.4 && sHi > lo && sLo < hi) cuts.push([Math.max(lo, sLo - 0.05), Math.min(hi, sHi + 0.05)])
@@ -912,6 +1103,16 @@ function Deck({ rect, stairs, eaveY, roofed }: {
         <meshStandardMaterial map={tex} roughness={0.85} />
       </mesh>
 
+      {nSteps > 1 && entryRects.map((r, i) => Array.from({ length: nSteps - 1 }, (_, j) => {
+        const a = j * tread, b = (j + 1) * tread               // distance from the deck edge
+        const top = -((j + 1) * stumpM) / nSteps
+        const box = r.dir === 'z+' ? { x0: r.x0, x1: r.x1, z0: r.z0 + a, z1: r.z0 + b }
+          : r.dir === 'z-' ? { x0: r.x0, x1: r.x1, z0: r.z1 - b, z1: r.z1 - a }
+          : r.dir === 'x+' ? { x0: r.x0 + a, x1: r.x0 + b, z0: r.z0, z1: r.z1 }
+          : { x0: r.x1 - b, x1: r.x1 - a, z0: r.z0, z1: r.z1 }
+        return <Box key={`es${i}-${j}`} {...box} y0={-stumpM - 0.1} y1={top} color="#8d6c49" />
+      }))}
+
       {pieces.map(({ a, b }, i) => {
         const horiz = a[1] === b[1]
         const rail = (y0: number, y1: number) => horiz
@@ -940,6 +1141,185 @@ function Deck({ rect, stairs, eaveY, roofed }: {
   )
 }
 
+// ---------- Exterior / interior walls ----------
+// A wall is exterior when a ray leaving one of its faces at right angles never meets another wall
+// or opening (so it looks out of the building). Sampled at three points along the wall and decided
+// by majority, so a missing piece of wall elsewhere does not flip it.
+function classifyWalls(walls: Wall[], openings: Opening[]) {
+  type Seg = { ax: number; az: number; bx: number; bz: number; t: number; self: number }
+  const segs: Seg[] = []
+  const wallZone: Record<number, Zone> = {}
+  const openZone: Record<number, Zone> = {}
+  const own = (w: Wall): Seg | null => {
+    if (w.arc) return null
+    if (w.diagonal) return { ax: w.ax as number, az: w.ay as number, bx: w.bx as number, bz: w.by as number, t: w.thickness, self: w.id }
+    const c = w.horizontal ? (w.y0 + w.y1) / 2 : (w.x0 + w.x1) / 2
+    return w.horizontal
+      ? { ax: w.x0, az: c, bx: w.x1, bz: c, t: w.thickness, self: w.id }
+      : { ax: c, az: w.y0, bx: c, bz: w.y1, t: w.thickness, self: w.id }
+  }
+  for (const w of walls) {
+    if (w.arc) {
+      const a = w.arc, n = 8
+      for (let i = 0; i < n; i++) {
+        const t0 = a.a0 + ((a.a1 - a.a0) * i) / n, t1 = a.a0 + ((a.a1 - a.a0) * (i + 1)) / n
+        segs.push({ ax: a.cx + a.r * Math.cos(t0), az: a.cy + a.r * Math.sin(t0),
+                    bx: a.cx + a.r * Math.cos(t1), bz: a.cy + a.r * Math.sin(t1), t: w.thickness, self: w.id })
+      }
+      wallZone[w.id] = 'ext'
+    } else {
+      const s = own(w)
+      if (s) segs.push(s)
+    }
+  }
+  for (const o of openings) {
+    segs.push(o.horizontal
+      ? { ax: o.start, az: o.centre, bx: o.end, bz: o.centre, t: o.thickness, self: -1 - o.id }
+      : { ax: o.centre, az: o.start, bx: o.centre, bz: o.end, t: o.thickness, self: -1 - o.id })
+  }
+
+  const blocked = (px: number, pz: number, dx: number, dz: number, self: number) => {
+    for (const s of segs) {
+      if (s.self === self) continue
+      const ex = s.bx - s.ax, ez = s.bz - s.az
+      const den = dx * ez - dz * ex
+      if (Math.abs(den) < 1e-9) continue
+      const qx = s.ax - px, qz = s.az - pz
+      const along = (qx * ez - qz * ex) / den
+      const u = (qx * dz - qz * dx) / den
+      const len = Math.hypot(ex, ez) || 1
+      const tol = (s.t / 2) / len
+      if (along > 0 && u >= -tol && u <= 1 + tol) return true
+    }
+    return false
+  }
+  const exterior = (s: Seg, self: number) => {
+    const len = Math.hypot(s.bx - s.ax, s.bz - s.az) || 1
+    const tx = (s.bx - s.ax) / len, tz = (s.bz - s.az) / len
+    const nx = -tz, nz = tx
+    for (const side of [1, -1]) {
+      let out = 0
+      for (const f of [0.25, 0.5, 0.75]) {
+        const px = s.ax + (s.bx - s.ax) * f + nx * side * (s.t / 2 + 0.03)
+        const pz = s.az + (s.bz - s.az) * f + nz * side * (s.t / 2 + 0.03)
+        if (!blocked(px, pz, nx * side, nz * side, self)) out++
+      }
+      if (out >= 2) return true
+    }
+    return false
+  }
+  for (const w of walls) {
+    if (w.arc) continue
+    const s = own(w)
+    wallZone[w.id] = s && exterior(s, w.id) ? 'ext' : 'int'
+  }
+  for (const o of openings) {
+    const s = segs.find(q => q.self === -1 - o.id)
+    if (s) openZone[o.id] = exterior(s, s.self) ? 'ext' : 'int'
+  }
+  return { wall: wallZone, opening: openZone }
+}
+
+// ---------- The uploaded plan, laid on the floor under the walls ----------
+function PlanImage({ plan, region }: {
+  plan: { src: string; wM: number; hM: number }
+  region?: Box2 | null            // part of the sheet to show (one floor); whole sheet when omitted
+}) {
+  const base = useTexture(plan.src)
+  const maxAniso = useThree(s => s.gl.capabilities.getMaxAnisotropy())
+  const r = useMemo(() => ({
+    x0: Math.max(0, region?.x0 ?? 0), z0: Math.max(0, region?.z0 ?? 0),
+    x1: Math.min(plan.wM, region?.x1 ?? plan.wM), z1: Math.min(plan.hM, region?.z1 ?? plan.hM),
+  }), [plan.wM, plan.hM, region?.x0, region?.z0, region?.x1, region?.z1])
+  const tex = useMemo(() => {
+    const t = base.clone()
+    t.colorSpace = THREE.SRGBColorSpace
+    t.anisotropy = maxAniso
+    t.repeat.set((r.x1 - r.x0) / plan.wM, (r.z1 - r.z0) / plan.hM)
+    t.offset.set(r.x0 / plan.wM, 1 - r.z1 / plan.hM)
+    t.needsUpdate = true
+    return t
+  }, [base, r, plan.wM, plan.hM, maxAniso])
+  useEffect(() => () => tex.dispose(), [tex])
+  // image top-left = plan (0, 0); plan x -> three x, plan y -> three z
+  return (
+    <mesh rotation-x={-Math.PI / 2} position={[(r.x0 + r.x1) / 2, 0.004, (r.z0 + r.z1) / 2]} renderOrder={1}>
+      <planeGeometry args={[r.x1 - r.x0, r.z1 - r.z0]} />
+      <meshBasicMaterial map={tex} toneMapped={false}
+                         polygonOffset polygonOffsetFactor={-2} polygonOffsetUnits={-2} />
+    </mesh>
+  )
+}
+
+// ---------- Floors (levels) ----------
+// A sheet that shows several floor plans side by side is one model whose walls fall into groups
+// (model.floors, found by the backend). Stacking does not change any wall: each floor is drawn in
+// its own group that is moved over the lowest floor and lifted by one storey per level.
+export interface StackConfig { order: number[]; nudge: Record<number, [number, number]> }
+export const LEVEL_SLAB = 0.1
+
+interface LevelData {
+  key: number
+  label: string
+  walls: Wall[]
+  openings: Opening[]
+  railings: Railing[]
+  stairs: Stair[]
+  offset: V3
+  bounds: { x0: number; y0: number; x1: number; y1: number }
+  roofBox: Box2
+  floorBox: Box2
+  region: Box2 | null
+}
+
+function wallsBox(ws: Wall[], b: { x0: number; y0: number; x1: number; y1: number }): Box2 {
+  return ws.length
+    ? {
+        x0: Math.min(...ws.map(w => w.x0)), z0: Math.min(...ws.map(w => w.y0)),
+        x1: Math.max(...ws.map(w => w.x1)), z1: Math.max(...ws.map(w => w.y1)),
+      }
+    : { x0: b.x0, z0: b.y0, x1: b.x1, z1: b.y1 }
+}
+
+function buildLevels(
+  model: PlanModel, walls: Wall[], openings: Opening[], stack: StackConfig | null | undefined, wallH: number,
+): LevelData[] {
+  const railings = model.railings ?? []
+  const stairs = model.stairs ?? []
+  const make = (key: number, label: string, ws: Wall[], os: Opening[], rs: Railing[], ss: Stair[],
+                b: LevelData['bounds'], offset: V3, region: Box2 | null): LevelData => {
+    const rb = wallsBox(ws, b)
+    return {
+      key, label, walls: ws, openings: os, railings: rs, stairs: ss, offset, bounds: b, roofBox: rb, region,
+      floorBox: { x0: Math.min(b.x0, rb.x0), z0: Math.min(b.y0, rb.z0), x1: Math.max(b.x1, rb.x1), z1: Math.max(b.y1, rb.z1) },
+    }
+  }
+  const floors = model.floors
+  if (!stack || !floors || floors.length < 2) {
+    return [make(-1, '', walls, openings, railings, stairs, model.bounds, [0, 0, 0], null)]
+  }
+  const byId = new Map(floors.map(f => [f.id, f]))
+  const order = stack.order.filter(id => byId.has(id))
+  for (const f of floors) if (!order.includes(f.id)) order.push(f.id)
+  const base = byId.get(order[0])!
+  return order.map((id, k) => {
+    const f = byId.get(id)!
+    const wset = new Set(f.wallIds), oset = new Set(f.openingIds)
+    const sset = new Set(f.stairIds), rset = new Set(f.railingIds)
+    const [sx, sz] = k === 0 ? [0, 0]
+      : (f.shiftTo[String(base.id)] ?? [base.bbox.x0 - f.bbox.x0, base.bbox.y0 - f.bbox.y0])
+    const [nx, nz] = k === 0 ? [0, 0] : (stack.nudge[id] ?? [0, 0])
+    const b = f.bbox
+    return make(
+      id, f.label,
+      walls.filter(w => wset.has(w.id)), openings.filter(o => oset.has(o.id)),
+      railings.filter(r => rset.has(r.id)), stairs.filter(s => sset.has(s.id)),
+      b, [sx + nx, k * (wallH + LEVEL_SLAB), sz + nz],
+      { x0: b.x0 - 0.3, z0: b.y0 - 0.3, x1: b.x1 + 0.3, z1: b.y1 + 0.3 },
+    )
+  })
+}
+
 // ---------- Viewer ----------
 interface ViewerProps {
   model: PlanModel
@@ -960,41 +1340,65 @@ interface ViewerProps {
   extensions: Record<number, Ext>
   onExtend: (gid: number, e: Ext) => void
   snapOn: boolean
+  showPlan?: boolean
+  selectedExtra?: ExtraSel | null
+  onPickExtra?: (sel: ExtraSel | null) => void
+  site?: SiteConfig | null
+  stack?: StackConfig | null
 }
 
 export default function Viewer({
   model, wallH, heights = {}, thicknesses = {}, deleted = [], selectedIds = [], onSelect,
   dimMode, dimensionUnit = 'ft-in', ground, groups, roof, stumpM, spec, finish, extensions = NO_EXT, onExtend, snapOn,
+  showPlan = false, stack = null, site = null, selectedExtra = null, onPickExtra,
 }: ViewerProps) {
-  const b = model.bounds
+  const walls = useMemo(() => applyExtensions(model.walls, groups, extensions), [model.walls, groups, extensions])
+  const visibleWalls = walls.filter(w => !deleted.includes(w.id))
+  const visibleOpenings = model.openings.filter(o => {
+    const gid = groups.openingGroup[o.id]
+    return gid === undefined || !deleted.includes(gid)
+  })
+
+  const [stairFlip, setStairFlip] = useState<Record<number, boolean>>({})
+  const extraSel = (kind: ExtraKind, id: number) => selectedExtra?.kind === kind && selectedExtra.id === id
+  const isAdded = (x: unknown) => !!(x as { added?: boolean }).added && !!onPickExtra
+
+  // one level normally; several when the sheet holds more than one floor plan and stacking is on
+  const levels = buildLevels(model, visibleWalls, visibleOpenings, stack, wallH)
+  const stacked = levels.length > 1
+  const baseLevel = levels[0]
+  const topLevel = levels[levels.length - 1]
+  const totalH = levels.length * wallH + (levels.length - 1) * LEVEL_SLAB
+
+  // exterior / interior walls, worked out per floor (a floor never looks out through its neighbour)
+  const stackKey = stack ? stack.order.join(',') : ''
+  const zones = useMemo(() => {
+    const out = { wall: {} as Record<number, Zone>, opening: {} as Record<number, Zone> }
+    const vw = walls.filter(w => !deleted.includes(w.id))
+    const vo = model.openings.filter(o => { const g = groups.openingGroup[o.id]; return g === undefined || !deleted.includes(g) })
+    for (const L of buildLevels(model, vw, vo, stack, wallH)) {
+      const z = classifyWalls(L.walls, L.openings)
+      Object.assign(out.wall, z.wall)
+      Object.assign(out.opening, z.opening)
+    }
+    return out
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [walls, deleted, model, groups, stackKey, wallH])
+
+  // the camera, light and ground follow the lowest floor (the others sit on top of it)
+  const b = baseLevel.bounds
   const cx = (b.x0 + b.x1) / 2
   const cz = (b.y0 + b.y1) / 2
   const size = Math.max(b.x1 - b.x0, b.y1 - b.y0, 4)
-
-  const walls = useMemo(() => applyExtensions(model.walls, groups, extensions), [model.walls, groups, extensions])
-  const visibleWalls = walls.filter(w => !deleted.includes(w.id))
 
   // the one wall being edited gets its two end handles
   const selGroups = Array.from(new Set(selectedIds.map(id => groups.groupOf[id] ?? id)))
   const editGid = selGroups.length === 1 ? selGroups[0] : null
   const axisInfo = editGid !== null ? groupAxis(model.walls, groups, editGid) : null
 
-  const roofBox: Box2 = visibleWalls.length
-    ? {
-        x0: Math.min(...visibleWalls.map(w => w.x0)),
-        z0: Math.min(...visibleWalls.map(w => w.y0)),
-        x1: Math.max(...visibleWalls.map(w => w.x1)),
-        z1: Math.max(...visibleWalls.map(w => w.y1)),
-      }
-    : { x0: b.x0, z0: b.y0, x1: b.x1, z1: b.y1 }
-
-  const floorBox: Box2 = {
-    x0: Math.min(b.x0, roofBox.x0), z0: Math.min(b.y0, roofBox.z0),
-    x1: Math.max(b.x1, roofBox.x1), z1: Math.max(b.y1, roofBox.z1),
-  }
-
-  // ----- roof + deck from the PDF (only when the backend found them) -----
-  const design = (model as PlanModel & { design?: DesignInfo }).design
+  // ----- roof + deck from the PDF (single floor only; only when the backend found them) -----
+  const roofBox = topLevel.roofBox
+  const design = stacked ? undefined : (model as PlanModel & { design?: DesignInfo }).design
   const useDesign = (roof.type as string) === 'design' && !!design?.roof
   const bx = roofBox.x1 - roofBox.x0
   const bz = roofBox.z1 - roofBox.z0
@@ -1026,17 +1430,218 @@ export default function Viewer({
       : { z0: mid - along / 2, z1: mid + along / 2, x0: roofBox.x0 - depth, x1: roofBox.x0, side, along, depth }
   }
 
-  const visibleOpenings = model.openings.filter(o => {
-    const gid = groups.openingGroup[o.id]
-    return gid === undefined || !deleted.includes(gid)
-  })
+  // decks drawn in the plan editor: rectangles in plan metres (plan y is the 3D z)
+  const userDecks = ((model as PlanModel & { decks?: UserDeck[] }).decks ?? [])
+  const deckRectOf = (d: UserDeck): DeckRect => {
+    const horiz = d.side === 'top' || d.side === 'bottom'
+    return { x0: d.x0, z0: d.y0, x1: d.x1, z1: d.y1, side: d.side,
+             along: horiz ? d.x1 - d.x0 : d.y1 - d.y0, depth: horiz ? d.y1 - d.y0 : d.x1 - d.x0 }
+  }
+
+  const renderLevel = (L: LevelData) => {
+    const isTop = L === topLevel
+    return (
+      <group key={L.key} position={L.offset}>
+        {/* Floor slab */}
+        <Box
+          x0={L.floorBox.x0} z0={L.floorBox.z0} x1={L.floorBox.x1} z1={L.floorBox.z1}
+          y0={-0.1} y1={0} color="#2b2d34"
+        />
+
+        {/* The uploaded plan on the floor (toggle in the sidebar) */}
+        {showPlan && model.plan && (
+          <TexBoundary fallback={null}>
+            <Suspense fallback={null}>
+              <PlanImage plan={model.plan} region={L.region} />
+            </Suspense>
+          </TexBoundary>
+        )}
+
+        {/* Walls: cut full-height wall meshes around openings; OpeningMesh renders lintels/sills. */}
+        {L.walls.flatMap(w => {
+          const t = thicknesses[w.id] ?? w.thickness
+          const H = heights[w.id] ?? wallH
+                    const added = isAdded(w)
+          const wallSel = selectedIds.includes(w.id) || extraSel('wall', w.id)
+          const pick = (e: ThreeEvent<MouseEvent>) => {
+            e.stopPropagation()
+            if (added) onPickExtra!({ kind: 'wall', id: w.id })
+            else onSelect(w.id, e.nativeEvent.ctrlKey || e.nativeEvent.metaKey)
+          }
+
+          if (w.arc) {
+            return [
+              <CurvedWall key={w.id} w={w} H={H} t={t} spec={spec} selected={wallSel} onPick={pick} />,
+            ]
+          }
+
+          // Keep diagonal walls intact; axis-aligned runs are cut at their openings.
+          if (w.diagonal) {
+            const ax = w.ax as number, ay = w.ay as number, bx2 = w.bx as number, by2 = w.by as number
+            const len = Math.hypot(bx2 - ax, by2 - ay)
+            return [
+              <group key={w.id} position={[(ax + bx2) / 2, 0, (ay + by2) / 2]}
+                     rotation-y={-Math.atan2(by2 - ay, bx2 - ax)}>
+                <Box x0={-len / 2} x1={len / 2} z0={-t / 2} z1={t / 2}
+                     y0={0} y1={H} color={WALL} glossy zone={zones.wall[w.id]}
+                     selected={wallSel} onClick={pick} />
+              </group>
+            ]
+          }
+
+          const mx = (w.x0 + w.x1) / 2
+          const mz = (w.y0 + w.y1) / 2
+          const x0 = w.horizontal ? w.x0 : mx - t / 2
+          const x1 = w.horizontal ? w.x1 : mx + t / 2
+          const z0 = w.horizontal ? mz - t / 2 : w.y0
+          const z1 = w.horizontal ? mz + t / 2 : w.y1
+          const segments = wallLengthSegments(w, L.openings)
+
+          return segments.map(([a, c], i) => (
+            <Box
+              key={`${w.id}-segment-${i}`}
+              x0={w.horizontal ? a : x0}
+              z0={w.horizontal ? z0 : a}
+              x1={w.horizontal ? c : x1}
+              z1={w.horizontal ? z1 : c}
+              y0={0} y1={H}
+              color={WALL}
+              glossy
+              zone={zones.wall[w.id]}
+              shrink={w.horizontal ? 0 : 0.004}
+              selected={wallSel}
+              onClick={pick}
+            />
+          ))
+        })}
+
+        {editGid !== null && axisInfo && L.walls.some(w => (groups.groupOf[w.id] ?? w.id) === editGid) && (
+          <ExtendHandles
+            key={editGid}
+            gid={editGid}
+            axis={axisInfo}
+            ext={extensions[editGid] ?? { start: 0, end: 0 }}
+            wallH={heights[axisInfo.startId] ?? wallH}
+            stumpM={stumpM}
+            snapOn={snapOn}
+            walls={L.walls}
+            skip={groups.members[editGid] ?? []}
+            onChange={onExtend}
+            origin={L.offset}
+          />
+        )}
+
+        {/* Railings */}
+        {L.railings.map(r => isAdded(r) ? (
+          <Pickable key={r.id} on={() => onPickExtra!({ kind: 'railing', id: r.id })}>
+            <RailingMesh r={r} height={1.0} />
+            <SelBox x0={r.x0} x1={r.x1} z0={r.y0} z1={r.y1} y0={0} y1={1.1}
+                    show={extraSel('railing', r.id)} pad={extraSel('railing', r.id) ? 0.04 : 0.25} />
+          </Pickable>
+        ) : (
+          <RailingMesh key={r.id} r={r} height={1.0} />
+        ))}
+
+        {/* Stairs */}
+        {L.stairs.map(stair => (
+          <StairsMesh
+            key={stair.id}
+            stair={stair}
+            rise={wallH}
+            walls={L.walls}
+            flip={stairFlip[stair.id] ?? false}
+            onFlip={() => setStairFlip(f => ({ ...f, [stair.id]: !f[stair.id] }))}
+          />
+        ))}
+
+        {/* Doors and windows */}
+        {L.openings.map(o => {
+          const gid = groups.openingGroup[o.id]
+          const has = gid !== undefined
+          const H = has ? (heights[gid] ?? wallH) : wallH
+          const t = has ? (thicknesses[gid] ?? o.thickness) : o.thickness
+
+          if (isAdded(o)) {
+            const th = o.thickness
+            const box = o.horizontal
+              ? { x0: o.start, x1: o.end, z0: o.centre - th / 2, z1: o.centre + th / 2 }
+              : { x0: o.centre - th / 2, x1: o.centre + th / 2, z0: o.start, z1: o.end }
+            return (
+              <Pickable key={o.id} on={() => onPickExtra!({ kind: 'opening', id: o.id })}>
+                <OpeningMesh o={o} H={wallH} spec={spec} zone={zones.opening[o.id]} />
+                <SelBox {...box} y0={0} y1={wallH} show={extraSel('opening', o.id)} pad={0.03} />
+              </Pickable>
+            )
+          }
+
+          return (
+            <OpeningMesh
+              key={o.id}
+              o={{ ...o, thickness: t }}
+              H={H}
+              spec={spec}
+              zone={zones.opening[o.id]}
+              selected={has && selectedIds.includes(gid)}
+              onPick={
+                has
+                  ? e => {
+                      e.stopPropagation()
+                      onSelect(gid, e.nativeEvent.ctrlKey || e.nativeEvent.metaKey)
+                    }
+                  : undefined
+              }
+            />
+          )
+        })}
+
+        {/* Dimensions */}
+        <Dimensions
+          model={{ ...model, walls: L.walls, openings: L.openings, bounds: L.bounds }}
+          H={wallH}
+          mode={dimMode}
+          scale={size * 1.6}
+          unit={dimensionUnit}
+        />
+
+        {/* Deck from the PDF */}
+        {isTop && useDesign && deckRect && (
+          <Deck rect={deckRect} stairs={model.stairs ?? []} eaveY={wallH} stumpM={stumpM}
+                entries={design?.deck?.entries}
+                roofed={!!design?.deck?.roofed && !!design?.roof?.verandah} />
+        )}
+
+        {L === baseLevel && userDecks.map(d => (
+          <Pickable key={`ud${d.id}`} on={() => onPickExtra?.({ kind: 'deck', id: d.id })}>
+            <Deck rect={deckRectOf(d)} stairs={model.stairs ?? []} eaveY={wallH} stumpM={stumpM}
+                  roofed={!!d.roofed} />
+            {extraSel('deck', d.id) && <SelBox x0={d.x0} x1={d.x1} z0={d.y0} z1={d.y1} y0={-0.12} y1={1.1} />}
+          </Pickable>
+        ))}
+
+        {/* Roof: on the top floor only */}
+        {isTop && (useDesign && design?.roof?.type === 'gable' ? (
+          roof.visible && (
+            <DesignRoof box={roofBox} eaveY={wallH} riseM={design.roof.riseM * k}
+                        axis={ridgeAxis} overhang={roof.overhangM} />
+          )
+        ) : (
+          <Roof
+            cfg={useDesign && design?.roof
+              ? { ...roof, type: design.roof.type as RoofType, ridgeM: wallH + design.roof.riseM * k }
+              : roof}
+            box={roofBox}
+            eaveY={wallH}
+          />
+        ))}
+      </group>
+    )
+  }
 
   return (
     <Canvas
       shadows
-      onPointerMissed={e => { if (!(e.ctrlKey || e.metaKey)) onSelect(null) }}
-      key={`${cx.toFixed(2)}-${cz.toFixed(2)}-${model.walls.length}`}
-      camera={{ position: [cx + size * 0.8, size * 0.9, cz + size * 1.1], fov: 50, far: 2000 }}
+      onPointerMissed={e => { if (!(e.ctrlKey || e.metaKey)) { onSelect(null); onPickExtra?.(null) } }}
+      camera={{ position: [cx + size * 0.8, size * 0.9 + totalH * 0.6, cz + size * 1.1], fov: 50, far: 2000 }}
       style={{ background: '#bcd4e6' }}
     >
       <Sky
@@ -1046,9 +1651,12 @@ export default function Viewer({
         mieCoefficient={0.005}
         mieDirectionalG={0.8}
       />
-      <fog attach="fog" args={['#bcd4e6', size * 3, size * 9]} />
+      <fog attach="fog" args={['#bcd4e6', site ? 400 : size * 3, site ? 2500 : size * 9]} />
 
-      <Lights cx={cx} cz={cz} size={size} />
+      <CameraRig cx={cx} cz={cz} size={size} totalH={totalH}
+        frameKey={`${cx.toFixed(2)}-${cz.toFixed(2)}-${model.walls.length}-${levels.length}`} />
+
+      <Lights cx={cx} cz={cz} size={size + totalH} />
 
       <Environment resolution={256}>
         <Lightformer form="rect" intensity={3} position={[0, 6, -6]} scale={[14, 6, 1]} />
@@ -1058,167 +1666,25 @@ export default function Viewer({
       </Environment>
 
       <Suspense fallback={null}>
-        <Ground type={ground} cx={cx} cz={cz} size={size} />
+        {site ? <SiteGround site={site} cx={cx} cz={cz} /> : <Ground type={ground} cx={cx} cz={cz} size={size} />}
       </Suspense>
 
       <FinishContext.Provider value={finish}>
         <group position={[0, stumpM, 0]}>
-          {/* Floor slab */}
-          <Box
-            x0={floorBox.x0}
-            z0={floorBox.z0}
-            x1={floorBox.x1}
-            z1={floorBox.z1}
-            y0={-0.1}
-            y1={0}
-            color="#2b2d34"
-          />
-
-          {/* Walls: cut full-height wall meshes around openings; OpeningMesh renders lintels/sills. */}
-          {visibleWalls.flatMap(w => {
-            const t = thicknesses[w.id] ?? w.thickness
-            const H = heights[w.id] ?? wallH
-            const pick = (e: ThreeEvent<MouseEvent>) => {
-              e.stopPropagation()
-              onSelect(w.id, e.nativeEvent.ctrlKey || e.nativeEvent.metaKey)
-            }
-
-            // Keep diagonal walls intact; axis-aligned runs are cut at their openings.
-            if (w.diagonal) {
-              const ax = w.ax as number, ay = w.ay as number, bx = w.bx as number, by = w.by as number
-              const len = Math.hypot(bx - ax, by - ay)
-              return [
-                <group key={w.id} position={[(ax + bx) / 2, 0, (ay + by) / 2]}
-                       rotation-y={-Math.atan2(by - ay, bx - ax)}>
-                  <Box x0={-len / 2} x1={len / 2} z0={-t / 2} z1={t / 2}
-                       y0={0} y1={H} color={WALL} glossy
-                       selected={selectedIds.includes(w.id)} onClick={pick} />
-                </group>
-              ]
-            }
-
-            const mx = (w.x0 + w.x1) / 2
-            const mz = (w.y0 + w.y1) / 2
-            const x0 = w.horizontal ? w.x0 : mx - t / 2
-            const x1 = w.horizontal ? w.x1 : mx + t / 2
-            const z0 = w.horizontal ? mz - t / 2 : w.y0
-            const z1 = w.horizontal ? mz + t / 2 : w.y1
-            const segments = wallLengthSegments(w, visibleOpenings)
-
-            return segments.map(([a, b], i) => (
-              <Box
-                key={`${w.id}-segment-${i}`}
-                x0={w.horizontal ? a : x0}
-                z0={w.horizontal ? z0 : a}
-                x1={w.horizontal ? b : x1}
-                z1={w.horizontal ? z1 : b}
-                y0={0} y1={H}
-                color={WALL}
-                glossy
-                shrink={w.horizontal ? 0 : 0.004}
-                selected={selectedIds.includes(w.id)}
-                onClick={pick}
-              />
-            ))
-          })}
-
-          {editGid !== null && axisInfo && (
-            <ExtendHandles
-              key={editGid}
-              gid={editGid}
-              axis={axisInfo}
-              ext={extensions[editGid] ?? { start: 0, end: 0 }}
-              wallH={heights[axisInfo.startId] ?? wallH}
-              stumpM={stumpM}
-              snapOn={snapOn}
-              walls={visibleWalls}
-              skip={groups.members[editGid] ?? []}
-              onChange={onExtend}
-            />
-          )}
-
-          {/* Railings */}
-          {model.railings?.map(r => (
-            <RailingMesh key={r.id} r={r} height={1.0} />
-          ))}
-
-          {/* NEW: Stairs */}
-          {model.stairs?.map(stair => (
-            <StairsMesh key={stair.id} stair={stair} height={1.2} />
-          ))}
-
-          {/* Doors and windows */}
-          {visibleOpenings.map(o => {
-            const gid = groups.openingGroup[o.id]
-            const has = gid !== undefined
-            const H = has ? (heights[gid] ?? wallH) : wallH
-            const t = has ? (thicknesses[gid] ?? o.thickness) : o.thickness
-
-            return (
-              <OpeningMesh
-                key={o.id}
-                o={{ ...o, thickness: t }}
-                H={H}
-                spec={spec}
-                selected={has && selectedIds.includes(gid)}
-                onPick={
-                  has
-                    ? e => {
-                        e.stopPropagation()
-                        onSelect(gid, e.nativeEvent.ctrlKey || e.nativeEvent.metaKey)
-                      }
-                    : undefined
-                }
-              />
-            )
-          })}
-
-          {/* Dimensions */}
-          <Dimensions
-            model={{
-              ...model,
-              walls: visibleWalls,
-              openings: visibleOpenings,
-            }}
-            H={wallH}
-            mode={dimMode}
-            scale={size * 1.6}
-            unit={dimensionUnit}
-          />
-
-          {/* Deck from the PDF */}
-          {useDesign && deckRect && (
-            <Deck rect={deckRect} stairs={model.stairs ?? []} eaveY={wallH}
-                  roofed={!!design?.deck?.roofed && !!design?.roof?.verandah} />
-          )}
-
-          {/* Roof */}
-          {useDesign && design?.roof?.type === 'gable' ? (
-            roof.visible && (
-              <DesignRoof box={roofBox} eaveY={wallH} riseM={design.roof.riseM * k}
-                          axis={ridgeAxis} overhang={roof.overhangM} />
-            )
-          ) : (
-            <Roof
-              cfg={useDesign && design?.roof
-                ? { ...roof, type: design.roof.type as RoofType, ridgeM: wallH + design.roof.riseM * k }
-                : roof}
-              box={roofBox}
-              eaveY={wallH}
-            />
-          )}
+          {levels.map(renderLevel)}
         </group>
       </FinishContext.Provider>
 
-      {/* Supporting stumps */}
-      <Stumps box={roofBox} height={stumpM} />
+      {/* Supporting stumps (under the lowest floor) */}
+      <Stumps box={baseLevel.roofBox} height={stumpM} />
       {useDesign && deckRect && <Stumps box={deckRect} height={stumpM} />}
+      {userDecks.map(d => <Stumps key={`us${d.id}`} box={deckRectOf(d)} height={stumpM} />)}
 
       {/* Camera controls */}
       <OrbitControls
         makeDefault
         enableDamping
-        target={[cx, stumpM + wallH / 2, cz]}
+        target={[cx, stumpM + totalH / 2, cz]}
       />
     </Canvas>
   )

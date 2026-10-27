@@ -360,6 +360,7 @@ def analyse(gray, ppm):
                 "length": ((x1 - x0) if horizontal else (y1 - y0)) / ppm,
                 "thickness": ((y1 - y0) if horizontal else (x1 - x0)) / ppm,
             })
+    
     openings = _find_openings(h_rects, v_rects, True, ink, dist, ppm) + _find_openings(v_rects, h_rects, False, ink, dist, ppm)
     for i, o in enumerate(openings):
         o["id"] = i

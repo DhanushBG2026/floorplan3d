@@ -17,6 +17,11 @@ import ChatPanel from './ChatPanel'
 import type { RoofType } from './roof'
 import { WALL_FINISHES, ROOF_FINISHES, DEFAULT_ROOF_COLOR, type WallFinishKey, type RoofFinishKey } from './materials'
 import { applyExtensions, groupAxis, snapCoordinate, clampExt, type Ext } from './extend'
+import PlanEditor from './PlanEditor'
+import SiteMap from './SiteMap'
+import type { SiteConfig } from './site'
+import FloorMarker from './FloorMarker'
+import type { ExtraSel } from './Viewer'
 
 type DimensionUnit = 'ft-in' | 'm' | 'cm' | 'mm' | 'in'
 
@@ -60,6 +65,57 @@ export default function App() {
   const [detector, setDetector] = useState<'opencv' | 'ml'>('opencv')
   const [extensions, setExtensions] = useState<Record<number, Ext>>({})
   const [snapOn, setSnapOn] = useState(true)
+  const [showPlan, setShowPlan] = useState(true)
+  const [extColor, setExtColor] = useState('')   // '' = use the finish's own colour
+  const [intColor, setIntColor] = useState('')
+  const [stackOn, setStackOn] = useState(false)
+  const [floorOrder, setFloorOrder] = useState<number[]>([])
+  const [floorNudge, setFloorNudge] = useState<Record<number, [number, number]>>({})
+  const [editorOpen, setEditorOpen] = useState(false)
+  const [site, setSite] = useState<SiteConfig | null>(null)
+  const [siteOpen, setSiteOpen] = useState(false)
+  const [floorsOpen, setFloorsOpen] = useState(false)
+  const [extra, setExtra] = useState<ExtraSel | null>(null)
+  const [removed, setRemoved] = useState<{ walls: any[]; openings: any[]; railings: any[]; decks: any[] }[]>([])
+
+  const pickExtra = (s: ExtraSel | null) => { console.log('pickExtra', s); setExtra(s); if (s) handleSelect(null) }
+
+  const deleteExtra = () => {
+    if (!extra || !model) return
+    const { kind, id } = extra
+    const m: any = model
+    const gone = { walls: [] as any[], openings: [] as any[], railings: [] as any[], decks: [] as any[] }
+    const keep = (arr: any[], bucket: any[], drop: (x: any) => boolean) => arr.filter(x => (drop(x) ? (bucket.push(x), false) : true))
+    const next: any = { ...m }
+    if (kind === 'wall') {
+      next.walls = keep(m.walls, gone.walls, w => w.id === id)
+      next.openings = keep(m.openings, gone.openings, o => o.wallRef === id)     // doors/windows drawn on that wall
+    }
+    if (kind === 'opening') next.openings = keep(m.openings, gone.openings, o => o.id === id)
+    if (kind === 'railing') next.railings = keep(m.railings ?? [], gone.railings, r => r.id === id)
+    if (kind === 'deck') next.decks = keep(m.decks ?? [], gone.decks, d => d.id === id)
+    setRemoved(h => [...h, gone])
+    setModel(next)
+    setExtra(null)
+  }
+  const restoreExtra = () => {
+    const last = removed[removed.length - 1]
+    if (!last) return
+    setModel(m => m ? ({ ...m, walls: [...m.walls, ...last.walls], openings: [...m.openings, ...last.openings],
+      railings: [...(m.railings ?? []), ...last.railings], decks: [...((m as any).decks ?? []), ...last.decks] } as any) : m)
+    setRemoved(h => h.slice(0, -1))
+  }
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!extra) return
+      if (/INPUT|TEXTAREA|SELECT/.test((e.target as HTMLElement)?.tagName ?? '')) return
+      if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); deleteExtra() }
+      if (e.key === 'Escape') setExtra(null)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  })
 
 
   const onFileChosen = async (f: File | null) => {
@@ -97,6 +153,9 @@ export default function App() {
         adjustments,
       })
       setModel(m)
+      setFloorOrder(m.floors?.map(f => f.id) ?? [])
+      setFloorNudge({})
+      setStackOn(!!m.floors && m.floors.length > 1 && m.floors.every(f => f.similar !== false))
       const d = m.design
       if (d?.roof) {
         setRoofType('design')
@@ -290,6 +349,62 @@ export default function App() {
       return () => window.removeEventListener('keydown', onKey)
     }, [selectedIds])
 
+  const stack = model?.floors && model.floors.length > 1 && stackOn
+    ? { order: floorOrder, nudge: floorNudge } : null
+  const LEVELS = ['Ground floor', 'First floor', 'Second floor', 'Third floor', 'Fourth floor']
+  const moveFloor = (i: number, d: number) =>
+    setFloorOrder(o => { const n = [...o]; [n[i], n[i + d]] = [n[i + d], n[i]]; return n })
+  const nudge = (id: number, axis: 0 | 1, metres: number) =>
+    setFloorNudge(n => { const c: [number, number] = [...(n[id] ?? [0, 0])] as [number, number]; c[axis] = metres; return { ...n, [id]: c } })
+  const planName = (id: number) => {
+    const fl = model!.floors!, f = fl.find(x => x.id === id)!
+    const cx = fl.map(g => g.bbox.x0 + g.bbox.x1), cy = fl.map(g => g.bbox.y0 + g.bbox.y1)
+    const horiz = Math.max(...cx) - Math.min(...cx) >= Math.max(...cy) - Math.min(...cy)
+    const vals = horiz ? cx : cy
+    const mine = horiz ? f.bbox.x0 + f.bbox.x1 : f.bbox.y0 + f.bbox.y1
+    const rank = [...vals].sort((a, b) => a - b).indexOf(mine)
+    const names = horiz ? ['left', 'middle', 'right'] : ['top', 'middle', 'bottom']
+    return `Plan on the ${rank === 0 ? names[0] : rank === fl.length - 1 ? names[2] : names[1]}`
+  }
+
+  const applyEdits = (ws: any[], os: any[], extra: { railings: any[]; decks: any[] }) => {
+    setModel(m => {
+      if (!m) return m
+      const next: any = {
+        ...m,
+        walls: [...m.walls, ...ws],
+        openings: [...m.openings, ...os],
+        railings: [...(m.railings ?? []), ...extra.railings],
+        decks: [...((m as any).decks ?? []), ...extra.decks],
+      }
+      if (next.floors) {
+        const at = (x: number, y: number) => next.floors.find((f: any) => x >= f.bbox.x0 && x <= f.bbox.x1 && y >= f.bbox.y0 && y <= f.bbox.y1)
+        next.floors = next.floors.map((f: any) => ({ ...f, wallIds: [...f.wallIds], openingIds: [...f.openingIds], railingIds: [...f.railingIds] }))
+        for (const w of ws) at((w.x0 + w.x1) / 2, (w.y0 + w.y1) / 2)?.wallIds.push(w.id)
+        for (const r of extra.railings) at((r.x0 + r.x1) / 2, (r.y0 + r.y1) / 2)?.railingIds.push(r.id)
+        for (const o of os) {
+          const [x, y] = o.horizontal ? [(o.start + o.end) / 2, o.centre] : [o.centre, (o.start + o.end) / 2]
+          at(x, y)?.openingIds.push(o.id)
+        }
+      }
+      return next
+    })
+    setEditorOpen(false)
+  }
+
+  const detectFloors = async (boxes: number[][], labels: string[], count: number) => {
+    const r = await fetch('/api/floors', {          // use the same base URL as your other api.ts calls
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: { walls: model!.walls, openings: model!.openings, stairs: model!.stairs, railings: model!.railings },
+        boxes, labels, count,
+      }),
+    })
+    if (!r.ok) throw new Error(await r.text())
+    return (await r.json()).floors
+  }
+  
+
   return (
     <div className="app">
       <aside className="side">
@@ -336,6 +451,17 @@ export default function App() {
           ))}
         </select>
 
+        <label>Exterior wall colour</label>
+        <div className="row">
+          <input type="color" value={extColor || '#ffffff'} onChange={e => setExtColor(e.target.value)} />
+          <button className="secondary" onClick={() => setExtColor('')} disabled={!extColor}>Reset</button>
+        </div>
+        <label>Interior wall colour</label>
+        <div className="row">
+          <input type="color" value={intColor || '#ffffff'} onChange={e => setIntColor(e.target.value)} />
+          <button className="secondary" onClick={() => setIntColor('')} disabled={!intColor}>Reset</button>
+        </div>
+
         {roofType !== 'none' && (
           <>
             <label className="check">
@@ -380,13 +506,58 @@ export default function App() {
         <label>
           Detection method
           <select value={detector} onChange={e => setDetector(e.target.value as 'opencv' | 'ml')}>
-            <option value="opencv">OpenCV (current)</option>
-            <option value="ml">ML model (includes railing)</option>
+            <option value="ml">ML model</option>
+            <option value="opencv">OpenCV</option>
           </select>
         </label>
 
         <button onClick={generate} disabled={loading || previewing}>Generate 3D model</button>
         <div className="status">{status}</div>
+
+        <button onClick={() => setEditorOpen(true)} disabled={!model}>Add walls / doors / windows</button>
+
+        {model?.plan && (
+          <label className="check">
+            <input type="checkbox" checked={showPlan} onChange={e => setShowPlan(e.target.checked)} />
+            Show plan image on floor
+          </label>
+        )}
+
+        {model?.floors && model.floors.length > 1 && (
+          <div className="panel">
+            <h2>{model.floors.length} floor plans found</h2>
+            <label className="check">
+              <input type="checkbox" checked={stackOn} onChange={e => setStackOn(e.target.checked)} />
+              Stack them as floors
+            </label>
+            {stackOn && (
+              <>
+                <div className="meta">Bottom to top</div>
+                {floorOrder.map((id, i) => (
+                  <div key={id}>
+                    <div className="row">
+                      <span style={{ flex: 1 }}>{LEVELS[i] ?? `Floor ${i + 1}`}: {planName(id)}</span>
+                      <button className="secondary" disabled={i === 0} onClick={() => moveFloor(i, -1)}>▲</button>
+                      <button className="secondary" disabled={i === floorOrder.length - 1} onClick={() => moveFloor(i, 1)}>▼</button>
+                    </div>
+                    {i > 0 && (
+                      <>
+                        <label>Shift left/right (ft)</label>
+                        <input type="range" min={-10} max={10} step={0.1}
+                               value={toFt((floorNudge[id] ?? [0, 0])[0])}
+                               onChange={e => nudge(id, 0, toM(parseFloat(e.target.value)))} />
+                        <label>Shift up/down on plan (ft)</label>
+                        <input type="range" min={-10} max={10} step={0.1}
+                               value={toFt((floorNudge[id] ?? [0, 0])[1])}
+                               onChange={e => nudge(id, 1, toM(parseFloat(e.target.value)))} />
+                      </>
+                    )}
+                  </div>
+                ))}
+              </>
+            )}
+          </div>
+        )}
 
         <label>Dimensions</label>
         <select value={dimMode} onChange={e => setDimMode(e.target.value as DimMode)}>
@@ -521,6 +692,15 @@ export default function App() {
           Restore {deleted.length} deleted wall{deleted.length > 1 ? 's' : ''}
         </button>
       )}
+
+      {extra && (
+        <div>
+          <h2>Selected {extra.kind}</h2>
+          <div className="meta">Added in the editor</div>
+          <button onClick={deleteExtra}>Delete {extra.kind}</button>
+        </div>
+      )}
+      {removed.length > 0 && <button onClick={restoreExtra}>Restore last deleted addition</button>}
               
       {model && <img className="overlay" src={model.overlay} alt="detection overlay" />}
       </aside>
@@ -530,6 +710,8 @@ export default function App() {
             <div className="toolbar">
               <button onClick={undo} disabled={!canUndo} title="Undo wall delete (Ctrl+Z)">↶ Undo</button>
               <button onClick={redo} disabled={!canRedo} title="Redo wall delete (Ctrl+Y)">↷ Redo</button>
+              <button onClick={() => setSiteOpen(true)} disabled={!model}>Place on site (map)</button>
+              <button onClick={() => setFloorsOpen(true)} disabled={!model}>Mark floor plans</button>
             </div>
           )}
           {model && groups ? (
@@ -548,13 +730,31 @@ export default function App() {
             roof={{ type: roofType as RoofType, visible: roofOn, ridgeM: toM(ridgeFt), overhangM: toM(overhangFt) }}
             stumpM={toM(stumpFt)}
             spec={{ sillM: toM(sillFt), headM: toM(topFt), doorM: toM(topFt) }}
-            finish={{ wall: WALL_FINISHES[wallFinish], roof: ROOF_FINISHES[roofFinish], roofColor }}
+            finish={{ wall: WALL_FINISHES[wallFinish], roof: ROOF_FINISHES[roofFinish], roofColor, exteriorColor: extColor || undefined, interiorColor: intColor || undefined }}
             extensions={extensions}
             onExtend={setExtension}
             snapOn={snapOn}
+            stack={stack}
+            showPlan={showPlan}
+            site={site}
+            selectedExtra={extra}
+            onPickExtra={pickExtra}
           />
         ) : (
           <p className="empty">Upload a plan to begin</p>
+        )}
+
+        {site && (
+          <div
+            className="attrib"
+            style={{
+              position: 'absolute', right: 6, bottom: 4, zIndex: 5,
+              fontSize: 10, color: '#fff', background: 'rgba(0,0,0,.45)',
+              padding: '1px 6px', borderRadius: 3, pointerEvents: 'none',
+            }}
+          >
+            {site.layer === 'satellite' ? 'Imagery © Esri, Maxar, Earthstar Geographics' : '© OpenStreetMap contributors'}
+          </div>
         )}
 
         {preview && (
@@ -562,6 +762,26 @@ export default function App() {
         )}
         
       </main>
+      {editorOpen && model && (
+        <PlanEditor image={model.overlay} model={model} onApply={applyEdits} onClose={() => setEditorOpen(false)} />
+      )}
+
+      {siteOpen && model && (
+        <SiteMap
+          planW={model.bounds.x1 - model.bounds.x0}
+          planD={model.bounds.y1 - model.bounds.y0}
+          value={site}
+          onApply={s => { setSite(s); setSiteOpen(false) }}
+          onClose={() => setSiteOpen(false)}
+        />
+      )}
+
+      {floorsOpen && model && (
+        <FloorMarker model={model} detect={detectFloors}
+          onApply={f => { setModel(m => m ? ({ ...m, floors: f ?? undefined } as any) : m); /* reset your stack order/nudge state here, as you do when a model loads */ setFloorsOpen(false) }} 
+          onClose={() => setFloorsOpen(false)}/>
+      )}
+
       {cropOpen && preview && (
         <CropDialog
           image={preview.image}

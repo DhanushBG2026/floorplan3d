@@ -29,7 +29,8 @@ export function buildGroups(model: PlanModel, tol = 0.1): WallGroups {
     let before: number | null = null
     let after: number | null = null
     for (const w of model.walls) {
-      
+
+      if (w.diagonal || w.arc) continue
       if (w.diagonal) continue
       if (w.horizontal !== o.horizontal) continue
       const centre = o.horizontal ? (w.y0 + w.y1) / 2 : (w.x0 + w.x1) / 2

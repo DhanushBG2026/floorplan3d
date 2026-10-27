@@ -13,6 +13,8 @@ export interface Wall {
   ay?: number
   bx?: number
   by?: number
+  arc?: { cx: number; cy: number; r: number; a0: number; a1: number }
+  bay?: boolean
 }
 
 export interface Opening {
@@ -38,6 +40,9 @@ export interface PlanModel {
   railings?: Railing[]
   stairs?: Stair[]
   design?: import('./Viewer').DesignInfo
+  plan?: { src: string; wM: number; hM: number }
+  floors?: FloorInfo[]
+  decks?: { id: number; x0: number; y0: number; x1: number; y1: number; side: 'top' | 'bottom' | 'left' | 'right'; roofed?: boolean }[]
 }
 
 export interface Railing {
@@ -61,6 +66,14 @@ export interface Stair {
   length: number
   width: number
   steps: number
+}
+
+export interface FloorInfo {
+  id: number; label: string
+  bbox: { x0: number; y0: number; x1: number; y1: number }
+  wallIds: number[]; openingIds: number[]; stairIds: number[]; railingIds: number[]
+  similar?: boolean
+  shiftTo: Record<string, [number, number]>
 }
 
 export type DimMode = 'off' | 'overall' | 'all'

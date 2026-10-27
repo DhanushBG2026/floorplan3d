@@ -1,7 +1,7 @@
 import os
 import cv2
 import numpy as np
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile, Body
 from fastapi.staticfiles import StaticFiles
 import base64
 from pydantic import BaseModel
@@ -12,6 +12,7 @@ from ml_detector import analyse_ml
 
 import hashlib
 from pdf_context import analyse_pdf
+from floors import split_floors, floors_from_boxes
 
 app = FastAPI(title="Floor plan -> 3D (MVP)")
 PDF_DPI = 200
@@ -196,7 +197,22 @@ async def convert(
     d = design_of(data)
     if d and d.get("ok"):
         model["design"] = d
-    return model
+    
+    ph, pw = gray.shape[:2]
+    tex = gray
+    if max(ph, pw) > 2400:                       # texture only; the physical size below is unchanged
+        f = 2400 / max(ph, pw)
+        tex = cv2.resize(gray, None, fx=f, fy=f, interpolation=cv2.INTER_AREA)
+    ok, buf = cv2.imencode(".png", tex)
+    if ok:
+        model["plan"] = {
+            "src": "data:image/png;base64," + base64.b64encode(buf.tobytes()).decode("ascii"),
+            "wM": pw / ppm, "hM": ph / ppm,      # size of the image in metres (final, calibrated ppm)
+        }
+    fl = split_floors(model)
+    if fl:
+        model["floors"] = fl
+
     return model
 
 
@@ -254,5 +270,15 @@ def chat(req: ChatRequest):
     except Exception as e:
         raise HTTPException(502, f"The language model call failed: {e}")
     return {"reply": reply}
+
+@app.post("/api/floors")
+async def api_floors(payload: dict = Body(...)):
+    model = payload["model"]                      # walls, openings, stairs, railings
+    boxes = payload.get("boxes") or []
+    if boxes:
+        info = floors_from_boxes(model, boxes, payload.get("labels"))
+    else:
+        info = split_floors(model, count=int(payload.get("count") or 0))
+    return {"floors": info}
 
 app.mount("/", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "..", "frontend"), html=True), name="ui")

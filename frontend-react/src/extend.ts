@@ -28,6 +28,7 @@ export function groupAxis(walls: Wall[], groups: WallGroups, gid: number): AxisI
   if (!ids || ids.length === 0) return null
   const pieces = ids.map(id => walls.find(w => w.id === id)).filter((w): w is Wall => !!w)
   if (pieces.length === 0) return null
+  if (pieces.some(w => w.arc)) return null // curved walls can't be extended
 
   const diag = pieces.find(w => w.diagonal)
   if (diag) {

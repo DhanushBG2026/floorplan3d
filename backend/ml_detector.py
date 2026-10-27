@@ -381,8 +381,76 @@ def _normalise_doors(mask, ppm):
                     band[:, i][(col == WALL) | (col == 0)] = DOOR
     return out
 
+def _set_door_widths(walls, openings, tol=0.1):
+    """Make every door exactly DOOR_STD (3.5 ft) wide, in the MODEL (not in the mask)."""
+    for o in openings:
+        if o["type"] != "door" or o["width"] < DOOR_NOISE:
+            continue
+        hz, c = o["horizontal"], o["centre"]
+        mid = (o["start"] + o["end"]) / 2.0
+        half = o["thickness"] / 2.0
+        lo, hi = -1e9, 1e9
+        # cross walls and other openings on the line limit how far the door can grow
+        for w in walls:
+            if w.get("diagonal") or w["horizontal"] == hz:
+                continue
+            p0, p1 = (w["y0"], w["y1"]) if hz else (w["x0"], w["x1"])
+            a0, a1 = (w["x0"], w["x1"]) if hz else (w["y0"], w["y1"])
+            if p0 - 0.02 <= c <= p1 + 0.02:
+                if a1 <= mid:
+                    lo = max(lo, a1)
+                elif a0 >= mid:
+                    hi = min(hi, a0)
+        for q in openings:
+            if q is o or q["horizontal"] != hz or abs(q["centre"] - c) > max(tol, half, q["thickness"] / 2):
+                continue
+            if q["end"] <= mid:
+                lo = max(lo, q["end"])
+            elif q["start"] >= mid:
+                hi = min(hi, q["start"])
+        lo = min(lo, o["start"]); hi = max(hi, o["end"])
+        s, e = mid - DOOR_STD / 2, mid + DOOR_STD / 2
 
-def _snap_openings(walls, openings, reach=0.5, tol=0.1):
+        # a door that sits against a cross wall stays against it (resizing around the centre would
+        # leave a gap between the door frame and that wall)
+        at_lo = lo > -1e8 and abs(o["start"] - lo) <= 0.1
+        at_hi = hi < 1e8 and abs(o["end"] - hi) <= 0.1
+
+        if at_lo and not at_hi:
+            s, e = lo, lo + DOOR_STD
+        elif at_hi and not at_lo:
+            s, e = hi - DOOR_STD, hi
+        if hi - lo < DOOR_STD:
+            s, e = lo, hi
+        else:
+            if s < lo:
+                s, e = lo, lo + DOOR_STD
+            if e > hi:
+                s, e = hi - DOOR_STD, hi
+        o["start"], o["end"], o["width"] = float(s), float(e), float(e - s)
+
+        # remove the wall that now lies under the door
+        out = []
+        for w in walls:
+            if w.get("diagonal") or w["horizontal"] != hz:
+                out.append(w)
+                continue
+            wc = (w["y0"] + w["y1"]) / 2 if hz else (w["x0"] + w["x1"]) / 2
+            a0, a1 = (w["x0"], w["x1"]) if hz else (w["y0"], w["y1"])
+            if abs(wc - c) > max(tol, half, w["thickness"] / 2) or a1 <= s + 0.005 or a0 >= e - 0.005:
+                out.append(w)
+                continue
+            for pa, pb in ([(a0, s)] if s - a0 > 0.03 else []) + ([(e, a1)] if a1 - e > 0.03 else []):
+                n = dict(w)
+                if hz:
+                    n["x0"], n["x1"], n["length"] = pa, pb, pb - pa
+                else:
+                    n["y0"], n["y1"], n["length"] = pa, pb, pb - pa
+                out.append(n)
+        walls[:] = out
+
+
+def _snap_openings(walls, openings, reach=0.5, tol=0.1, thick_default=0.0):
     """Close the small gaps between a door/window and the wall pieces beside it: each neighbouring
     wall piece is extended to the opening's edge, and the opening takes the wall's centre line and
     thickness so the two line up exactly (this also lets groups.ts pair them)."""
@@ -403,6 +471,8 @@ def _snap_openings(walls, openings, reach=0.5, tol=0.1):
                 if best[1] is None or a0 < best[1][0]:
                     best[1] = (a0, w, centre)
         near = [b[1:] for b in best.values() if b]
+        if not near and thick_default:      # a door with no wall beside it would be paper-thin
+            o["thickness"] = max(o["thickness"], thick_default)
         if near:
             o["centre"] = float(np.mean([c for _, c in near]))
             o["thickness"] = float(max(w["thickness"] for w, _ in near))
@@ -416,26 +486,78 @@ def _snap_openings(walls, openings, reach=0.5, tol=0.1):
             key = "x0" if hz else "y0"
             w[key] = o["end"]
             w["length"] = (w["x1"] - w["x0"]) if hz else (w["y1"] - w["y0"])
+            
+        # No wall piece on this side of the opening, but a cross wall a little further on: fill the
+        # gap with a short wall piece so the frame meets the cross wall.
+        for side in (-1, 1):
+            if best[side]:
+                continue
+            edge = o["start"] if side < 0 else o["end"]
+            face = None
+            for w in list(walls):
+                if w.get("diagonal") or w["horizontal"] == hz:
+                    continue
+                p0, p1 = (w["y0"], w["y1"]) if hz else (w["x0"], w["x1"])        # across-range
+                a0, a1 = (w["x0"], w["x1"]) if hz else (w["y0"], w["y1"])        # along-range
+                if not (p0 - tol <= o["centre"] <= p1 + tol):
+                    continue
+                if side < 0 and a1 <= edge + 0.02 and edge - a1 <= reach:
+                    face = a1 if face is None else max(face, a1)
+                elif side > 0 and a0 >= edge - 0.02 and a0 - edge <= reach:
+                    face = a0 if face is None else min(face, a0)
+            if face is None or abs(face - edge) <= 0.015:
+                continue
+            lo_, hi_ = (face, edge) if side < 0 else (edge, face)
+            th = o["thickness"]
+            c = o["centre"]
+            piece = {"id": len(walls), "horizontal": bool(hz), "length": hi_ - lo_, "thickness": th}
+            if hz:
+                piece.update(x0=lo_, x1=hi_, y0=c - th / 2, y1=c + th / 2)
+            else:
+                piece.update(y0=lo_, y1=hi_, x0=c - th / 2, x1=c + th / 2)
+            walls.append(piece)
 
 
 def mask_to_model(mask, ppm):
     """Cleaned label mask (work resolution) + px/m at that resolution -> PlanModel-style dict."""
     ppm = max(float(ppm), 1e-6)
     if NORMALISE_DOORS:
-        mask = _split_merged_doors(mask, ppm)
-        mask = _normalise_doors(mask, ppm)
+        if NORMALISE_DOORS:
+            mask = _split_merged_doors(mask, ppm)
     wall_boxes, wall_diag = _fit_boxes(mask == WALL, max(4, int(ppm * .12)),
                                        max(6, int(ppm * .02) ** 2), allow_diagonal=True,
                                        ppm_hint=ppm)
     walls = _wall_dicts(wall_boxes, ppm, wall_diag)
     rail_boxes, _ = _fit_boxes(mask == RAILING, max(4, int(ppm * .10)), 6, ppm_hint=ppm)
     railings = _wall_dicts(rail_boxes, ppm)
+        # Curved bay windows: window pixels that form an arc become curved walls with glass.
+    # Everything else in the window mask stays an ordinary straight window.
+    bays, bay_px = [], np.zeros(mask.shape, bool)
+    try:
+        from shapes import extra_walls
+        win255 = ((mask == WINDOW) * 255).astype(np.uint8)
+        bays = extra_walls(win255, [], ppm, first_id=0, window_mask=win255,
+                           diagonal=False, consumed=bay_px)
+    except Exception:
+        bays = []                      # curved bays are optional; never break detection
+
     min_open = max(4, int(ppm * .25))
     openings = (_openings(mask == DOOR, "door", ppm, min_open)
-                + _openings(mask == WINDOW, "window", ppm, min_open))
+                + _openings((mask == WINDOW) & ~bay_px, "window", ppm, min_open))
+    if NORMALISE_DOORS:
+        _set_door_widths(walls, openings)
+    # specks left by jagged mask edges (much thinner than a wall and very short) are not walls
+    th = sorted(w["thickness"] for w in walls if not w.get("diagonal") and w["length"] > 0.5)
+    t_med = th[len(th) // 2] if th else 0.0
+    if t_med:
+        walls[:] = [w for w in walls if w.get("diagonal")
+                    or not (w["thickness"] < 0.45 * t_med and w["length"] < 4 * t_med)]
+    for i, w in enumerate(walls):
+        w["id"] = i
     for i, o in enumerate(openings):
         o["id"] = i
-    _snap_openings(walls, openings)
+    _snap_openings(walls, openings, thick_default=t_med)
+
     stairs = _stairs(mask == STAIRS, ppm, max(30, int((ppm * .3) ** 2)))
 
     # Floor slab / camera framing follow the building (walls + openings), not stray stairs/rails.
