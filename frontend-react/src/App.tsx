@@ -78,7 +78,7 @@ export default function App() {
   const [extra, setExtra] = useState<ExtraSel | null>(null)
   const [removed, setRemoved] = useState<{ walls: any[]; openings: any[]; railings: any[]; decks: any[] }[]>([])
 
-  const pickExtra = (s: ExtraSel | null) => { console.log('pickExtra', s); setExtra(s); if (s) handleSelect(null) }
+  const pickExtra = (s: ExtraSel | null) => {setExtra(s); if (s) handleSelect(null) }
 
   const deleteExtra = () => {
     if (!extra || !model) return
@@ -349,6 +349,13 @@ export default function App() {
       return () => window.removeEventListener('keydown', onKey)
     }, [selectedIds])
 
+   // the order always matches the floors that exist: stale ids are dropped, new ones added
+  const orderedIds = (() => {
+    const ids = (model?.floors ?? []).map(f => f.id)
+    const kept = floorOrder.filter(id => ids.includes(id))
+    return [...kept, ...ids.filter(id => !kept.includes(id))]
+  })()
+
   const stack = model?.floors && model.floors.length > 1 && stackOn
     ? { order: floorOrder, nudge: floorNudge } : null
   const LEVELS = ['Ground floor', 'First floor', 'Second floor', 'Third floor', 'Fourth floor']
@@ -357,7 +364,8 @@ export default function App() {
   const nudge = (id: number, axis: 0 | 1, metres: number) =>
     setFloorNudge(n => { const c: [number, number] = [...(n[id] ?? [0, 0])] as [number, number]; c[axis] = metres; return { ...n, [id]: c } })
   const planName = (id: number) => {
-    const fl = model!.floors!, f = fl.find(x => x.id === id)!
+    const fl = model?.floors ?? [], f = fl.find(x => x.id === id)
+    if (!f) return `Floor ${id + 1}`
     const cx = fl.map(g => g.bbox.x0 + g.bbox.x1), cy = fl.map(g => g.bbox.y0 + g.bbox.y1)
     const horiz = Math.max(...cx) - Math.min(...cx) >= Math.max(...cy) - Math.min(...cy)
     const vals = horiz ? cx : cy
@@ -533,12 +541,12 @@ export default function App() {
             {stackOn && (
               <>
                 <div className="meta">Bottom to top</div>
-                {floorOrder.map((id, i) => (
+                {orderedIds.map((id, i) => (
                   <div key={id}>
                     <div className="row">
                       <span style={{ flex: 1 }}>{LEVELS[i] ?? `Floor ${i + 1}`}: {planName(id)}</span>
                       <button className="secondary" disabled={i === 0} onClick={() => moveFloor(i, -1)}>▲</button>
-                      <button className="secondary" disabled={i === floorOrder.length - 1} onClick={() => moveFloor(i, 1)}>▼</button>
+                      <button className="secondary" disabled={i === orderedIds.length - 1} onClick={() => moveFloor(i, 1)}>▼</button>
                     </div>
                     {i > 0 && (
                       <>
@@ -778,8 +786,14 @@ export default function App() {
 
       {floorsOpen && model && (
         <FloorMarker model={model} detect={detectFloors}
-          onApply={f => { setModel(m => m ? ({ ...m, floors: f ?? undefined } as any) : m); /* reset your stack order/nudge state here, as you do when a model loads */ setFloorsOpen(false) }} 
-          onClose={() => setFloorsOpen(false)}/>
+          onApply={f => {
+            setModel(m => m ? ({ ...m, floors: f ?? undefined } as any) : m)
+            setFloorOrder((f ?? []).map((x: any) => x.id))
+            setFloorNudge({})
+            setStackOn(!!f && f.length > 1)
+            setFloorsOpen(false)
+          }}
+          onClose={() => setFloorsOpen(false)} />
       )}
 
       {cropOpen && preview && (

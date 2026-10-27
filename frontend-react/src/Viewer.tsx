@@ -1640,6 +1640,9 @@ export default function Viewer({
   return (
     <Canvas
       shadows
+      onCreated={({ gl }) => {
+        gl.domElement.addEventListener('webglcontextlost', e => e.preventDefault())  // lets the browser restore it
+      }}
       onPointerMissed={e => { if (!(e.ctrlKey || e.metaKey)) { onSelect(null); onPickExtra?.(null) } }}
       camera={{ position: [cx + size * 0.8, size * 0.9 + totalH * 0.6, cz + size * 1.1], fov: 50, far: 2000 }}
       style={{ background: '#bcd4e6' }}
