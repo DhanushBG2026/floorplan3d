@@ -1,6 +1,7 @@
 import { Component, Suspense, createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import * as THREE from 'three'
-import { Canvas, useThree, type ThreeEvent } from '@react-three/fiber'
+import { Canvas, useFrame, useThree, type ThreeEvent } from '@react-three/fiber'
+import { FpvController, doorTargets } from './Fpv'
 import {
   OrbitControls, Html, Line, Edges, useTexture, Environment, Lightformer, Sky,
 } from '@react-three/drei'
@@ -181,20 +182,32 @@ function DoorParts({ o, h, doorH }: { o: Opening; h: number; doorH: number }) {
   const f = 0.05
   const leafT = 0.045
   const knobY = Math.min(1.0, dh / 2)
-  const knobAlong = o.end - f - 0.12
+  const leafLen = o.end - o.start - 2 * f
+  const knobAlong = leafLen - 0.12
 
-  const part = (
-    a0: number, a1: number, p0: number, p1: number,
-    y0: number, y1: number, color: string, glossy = false,
-  ) =>
+  const swing = useRef<THREE.Group>(null)
+  const cur = useRef(0)
+  useFrame((_, dt) => {
+    const g = swing.current
+    if (!g) return
+    const target = doorTargets.get(o.id) ?? 0
+    if (Math.abs(cur.current - target) < 0.002) {
+      if (cur.current !== target) { cur.current = target; g.rotation.y = target }
+      return
+    }
+    cur.current += (target - cur.current) * Math.min(1, dt * 6)
+    g.rotation.y = cur.current
+  })
+
+  const frame = (a0: number, a1: number) =>
     o.horizontal ? (
-      <Box x0={a0} x1={a1} z0={p0} z1={p1} y0={y0} y1={y1} color={color} glossy={glossy} />
+      <Box x0={a0} x1={a1} z0={c - t / 2} z1={c + t / 2} y0={0} y1={dh} color={DOOR_FRAME} />
     ) : (
-      <Box x0={p0} x1={p1} z0={a0} z1={a1} y0={y0} y1={y1} color={color} glossy={glossy} />
+      <Box x0={c - t / 2} x1={c + t / 2} z0={a0} z1={a1} y0={0} y1={dh} color={DOOR_FRAME} />
     )
 
   const knob = (side: 1 | -1) => {
-    const p = c + side * (leafT / 2 + 0.02)
+    const p = side * (leafT / 2 + 0.02)
     const pos: V3 = o.horizontal ? [knobAlong, knobY, p] : [p, knobY, knobAlong]
     return (
       <mesh position={pos} castShadow>
@@ -204,13 +217,21 @@ function DoorParts({ o, h, doorH }: { o: Opening; h: number; doorH: number }) {
     )
   }
 
+  const hinge: V3 = o.horizontal ? [o.start + f, 0, c] : [c, 0, o.start + f]
+
   return (
     <>
-      {part(o.start, o.start + f, c - t / 2, c + t / 2, 0, dh, DOOR_FRAME)}
-      {part(o.end - f, o.end, c - t / 2, c + t / 2, 0, dh, DOOR_FRAME)}
-      {part(o.start + f, o.end - f, c - leafT / 2, c + leafT / 2, 0.01, dh - 0.01, DOOR_WOOD)}
-      {knob(1)}
-      {knob(-1)}
+      {frame(o.start, o.start + f)}
+      {frame(o.end - f, o.end)}
+      <group ref={swing} position={hinge}>
+        {o.horizontal ? (
+          <Box x0={0} x1={leafLen} z0={-leafT / 2} z1={leafT / 2} y0={0.01} y1={dh - 0.01} color={DOOR_WOOD} />
+        ) : (
+          <Box x0={-leafT / 2} x1={leafT / 2} z0={0} z1={leafLen} y0={0.01} y1={dh - 0.01} color={DOOR_WOOD} />
+        )}
+        {knob(1)}
+        {knob(-1)}
+      </group>
     </>
   )
 }
@@ -1345,12 +1366,14 @@ interface ViewerProps {
   onPickExtra?: (sel: ExtraSel | null) => void
   site?: SiteConfig | null
   stack?: StackConfig | null
+  fpv?: boolean
+  onExitFpv?: () => void
 }
 
 export default function Viewer({
   model, wallH, heights = {}, thicknesses = {}, deleted = [], selectedIds = [], onSelect,
   dimMode, dimensionUnit = 'ft-in', ground, groups, roof, stumpM, spec, finish, extensions = NO_EXT, onExtend, snapOn,
-  showPlan = false, stack = null, site = null, selectedExtra = null, onPickExtra,
+  showPlan = false, stack = null, site = null, selectedExtra = null, onPickExtra, fpv = false, onExitFpv,
 }: ViewerProps) {
   const walls = useMemo(() => applyExtensions(model.walls, groups, extensions), [model.walls, groups, extensions])
   const visibleWalls = walls.filter(w => !deleted.includes(w.id))
@@ -1643,7 +1666,7 @@ export default function Viewer({
       onCreated={({ gl }) => {
         gl.domElement.addEventListener('webglcontextlost', e => e.preventDefault())  // lets the browser restore it
       }}
-      onPointerMissed={e => { if (!(e.ctrlKey || e.metaKey)) { onSelect(null); onPickExtra?.(null) } }}
+      onPointerMissed={e => { if (!fpv && !(e.ctrlKey || e.metaKey)) { onSelect(null); onPickExtra?.(null) } }}
       camera={{ position: [cx + size * 0.8, size * 0.9 + totalH * 0.6, cz + size * 1.1], fov: 50, far: 2000 }}
       style={{ background: '#bcd4e6' }}
     >
@@ -1683,9 +1706,23 @@ export default function Viewer({
       {useDesign && deckRect && <Stumps box={deckRect} height={stumpM} />}
       {userDecks.map(d => <Stumps key={`us${d.id}`} box={deckRectOf(d)} height={stumpM} />)}
 
+      {fpv && (
+        <FpvController
+          walls={baseLevel.walls}
+          openings={baseLevel.openings}
+          offset={baseLevel.offset}
+          floorY={stumpM}
+          bounds={baseLevel.bounds}
+          zoneOf={zones.opening}
+          thick={w => thicknesses[w.id] ?? Number(w.thickness)}
+          onExit={() => onExitFpv?.()}
+        />
+      )}
+
       {/* Camera controls */}
       <OrbitControls
         makeDefault
+        enabled={!fpv}
         enableDamping
         target={[cx, stumpM + totalH / 2, cz]}
       />

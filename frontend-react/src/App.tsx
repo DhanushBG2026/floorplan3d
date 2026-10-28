@@ -76,6 +76,7 @@ export default function App() {
   const [extColor, setExtColor] = useState('')   // '' = use the finish's own colour
   const [intColor, setIntColor] = useState('')
   const [stackOn, setStackOn] = useState(false)
+  const [fpvOn, setFpvOn] = useState(false)
   const [floorOrder, setFloorOrder] = useState<number[]>([])
   const [floorNudge, setFloorNudge] = useState<Record<number, [number, number]>>({})
   const [editorOpen, setEditorOpen] = useState(false)
@@ -768,6 +769,9 @@ export default function App() {
               <button onClick={redo} disabled={!canRedo} title="Redo wall delete (Ctrl+Y)">↷ Redo</button>
               <button onClick={() => setSiteOpen(true)} disabled={!model}>Place on site (map)</button>
               <button onClick={() => setFloorsOpen(true)} disabled={!model}>Mark floor plans</button>
+              <button onClick={() => setFpvOn(v => !v)} disabled={!model}>
+                {fpvOn ? 'Exit walk-in' : 'Walk in (FPV)'}
+              </button>
             </div>
           )}
           {model && groups ? (
@@ -795,6 +799,8 @@ export default function App() {
             site={site}
             selectedExtra={extra}
             onPickExtra={pickExtra}
+            fpv={fpvOn}
+            onExitFpv={() => setFpvOn(false)}
           />
         ) : (
           <p className="empty">Upload a plan to begin</p>
